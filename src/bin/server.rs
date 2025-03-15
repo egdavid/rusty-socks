@@ -3,14 +3,24 @@ use warp::{self, Filter};
 use log::info;
 use std::net::SocketAddr;
 
-use rusty_socks::constants::{DEFAULT_HOST, DEFAULT_PORT, WS_PATH};
+use rusty_socks::config::ServerConfig;
+use rusty_socks::constants::WS_PATH;
 use rusty_socks::core::session::create_session_manager;
 use rusty_socks::handlers::websocket::handle_ws_client;
 
 #[tokio::main]
 async fn main() {
+
+    // Initialize env
+    dotenv::dotenv().ok();
+
     // Initialize logging
     env_logger::init();
+
+    // Load config from .env
+    let config = ServerConfig::from_env();
+
+    info!("Configuration: host={}, port={}", config.host, config.port);
 
     // Create session manager
     let sessions = create_session_manager();
@@ -20,6 +30,7 @@ async fn main() {
         .and(warp::ws())
         .and(with_sessions(sessions.clone()))
         .map(|ws: warp::ws::Ws, sessions| {
+            info!("New websocket connection");
             ws.on_upgrade(move |socket| handle_ws_client(socket, sessions))
         });
 
@@ -31,7 +42,7 @@ async fn main() {
     let routes = ws_route.or(health_route);
 
     // Build the server address
-    let addr: SocketAddr = format!("{}:{}", DEFAULT_HOST, DEFAULT_PORT)
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .expect("Invalid address");
 

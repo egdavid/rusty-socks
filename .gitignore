@@ -13,10 +13,6 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 
-# Environment variables
-.env
-.env.*
-
 # Binary output
 /bin/
 
