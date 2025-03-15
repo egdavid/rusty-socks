@@ -31,7 +31,7 @@ The server is built on the following components:
 Clone the repository and build the project:
 
 ```bash
-git clone https://github.com/egdavid/rusty-socks
+git clone https://github.com/egdavid/rusty-socks.git
 cd rusty-socks
 cargo build --release
 ```
@@ -105,6 +105,8 @@ socket.onclose = function() {
 
 ## Testing
 
+### Automated Tests
+
 Run the integration tests:
 
 ```bash
@@ -115,6 +117,63 @@ Run specific tests:
 
 ```bash
 cargo test --test websocket_test
+```
+
+### Manual WebSocket testing using wscat
+
+You can use `wscat` to manually test the WebSocket server functionality. This is particularly useful for debugging and verifying real-time message exchange.
+
+#### Installation
+
+Install wscat using npm:
+
+```bash
+npm install -g wscat
+```
+
+#### Basic Connection Testing
+
+Connect to the WebSocket server:
+
+```bash
+wscat -c ws://localhost:3030/ws
+```
+
+#### Testing Message Exchange
+
+1. Start the server:
+   ```bash
+   cargo run --bin rusty_socks
+   ```
+
+2. Connect with a client:
+   ```bash
+   wscat -c ws://localhost:3030/ws
+   ```
+
+3. After connecting, you should receive a welcome message with your client ID.
+
+4. Send a test message (should be properly formatted JSON):
+   ```json
+   {"id":"00000000-0000-0000-0000-000000000000","sender":"test_user","content":"Hello from wscat!","timestamp":"2025-03-15T12:00:00Z"}
+   ```
+
+5. Any response from the server will be displayed in the terminal.
+
+#### Testing Multiple Clients
+
+For testing broadcast functionality, open multiple terminal sessions with wscat connections and observe how messages are distributed among clients.
+
+#### Connection Options
+
+Connect with verbose output for debugging:
+```bash
+wscat -c ws://localhost:3030/ws --verbose
+```
+
+Connect to a custom port:
+```bash
+wscat -c ws://localhost:8080/ws
 ```
 
 ## Contributing
