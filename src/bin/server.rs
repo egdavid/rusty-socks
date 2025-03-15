@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use warp::{self, Filter};
-use log::{info, error};
+use log::info;
 use std::net::SocketAddr;
 
 use rusty_socks::constants::{DEFAULT_HOST, DEFAULT_PORT, WS_PATH};
