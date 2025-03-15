@@ -19,6 +19,9 @@ Cargo.lock
 # Documentation
 /doc/
 
+# Environment files
+.env
+
 # Local configuration
 config.local.toml
 *.local.toml
