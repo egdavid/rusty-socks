@@ -6,12 +6,6 @@ use warp::ws::Message as WsMessage;
 use crate::core::connection::Connection;
 use crate::core::message::SocketMessage;
 
-// Represents a client connection with its associated sender channel
-pub struct Client {
-    pub id: String,
-    pub sender: mpsc::UnboundedSender<WsMessage>,
-}
-
 // Manages multiple client connections and their state
 pub struct SessionManager {
     connections: HashMap<String, Connection>,
