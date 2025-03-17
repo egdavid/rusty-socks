@@ -7,6 +7,7 @@ use log::{info, error, warn};
 
 use crate::core::session::{Sessions};
 use crate::core::message::{SocketMessage, Message as ChatMessage};
+use crate::core::connection::Connection;
 
 // Handle a WebSocket connection
 pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {

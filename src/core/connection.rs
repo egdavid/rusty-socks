@@ -26,6 +26,16 @@ impl Connection {
         }
     }
 
+    /// Create a new connection with a specific ID
+    pub fn with_id(id: String, sender: mpsc::UnboundedSender<Message>) -> Self {
+        Self {
+            id,
+            sender,
+            connected_at: Instant::now(),
+            last_ping: Instant::now(),
+        }
+    }
+
     /// Send a text message through this connection
     pub fn send_text(&self, text: &str) -> bool {
         match self.sender.send(Message::text(text)) {

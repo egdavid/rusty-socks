@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use warp::ws::Message as WsMessage;
 
+use crate::core::connection::Connection;
 use crate::core::message::SocketMessage;
 
 // Represents a client connection with its associated sender channel
@@ -13,25 +14,24 @@ pub struct Client {
 
 // Manages multiple client connections and their state
 pub struct SessionManager {
-    clients: HashMap<String, mpsc::UnboundedSender<WsMessage>>,
+    connections: HashMap<String, Connection>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
-            clients: HashMap::new(),
+            connections: HashMap::new(),
         }
     }
 
     // Register a new client connection
     pub fn register(&mut self, id: String, sender: mpsc::UnboundedSender<WsMessage>) {
-        self.clients.insert(id, sender);
+        let connection = Connection::with_id(id.clone(), sender);
+        self.connections.insert(id, connection);
     }
 
     // Remove a client connection
-    pub fn unregister(&mut self, id: &str) {
-        self.clients.remove(id);
-    }
+    pub fn unregister(&mut self, id: &str) { self.connections.remove(id); }
 
     // Broadcast a message to all connected clients
     pub fn broadcast(&self, message: &SocketMessage, sender_id: &str) -> usize {
@@ -40,10 +40,10 @@ impl SessionManager {
 
         let mut success_count = 0;
 
-        for (id, tx) in &self.clients {
+        for (id, connection) in &self.connections {
             // Don't send the message back to its sender
             if id != sender_id {
-                if tx.send(ws_message.clone()).is_ok() {
+                if connection.sender.send(ws_message.clone()).is_ok() {
                     success_count += 1;
                 }
             }
@@ -54,7 +54,16 @@ impl SessionManager {
 
     // Get current clients count
     pub fn client_count(&self) -> usize {
-        self.clients.len()
+        self.connections.len()
+    }
+
+    /// Check for stale connections and return their IDs
+    pub fn check_stale_connections(&self, timeout: std::time::Duration) -> Vec<String> {
+        self.connections
+            .iter()
+            .filter(|(_, conn)| conn.is_stale(timeout))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 }
 
