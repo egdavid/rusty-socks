@@ -5,17 +5,57 @@ use warp::ws::Message as WsMessage;
 
 use crate::core::connection::Connection;
 use crate::core::message::SocketMessage;
+use crate::storage;
 
 // Manages multiple client connections and their state
 pub struct SessionManager {
     connections: HashMap<String, Connection>,
+    message_store: Option<storage::message_store::SharedMessageStore>
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
             connections: HashMap::new(),
+            message_store: None
         }
+    }
+
+    // Set the message store
+    pub fn set_message_store(&mut self, message_store: storage::message_store::SharedMessageStore) {
+        self.message_store = Some(message_store);
+    }
+
+    // Get the message store
+    pub fn get_message_store(&self) -> Option<&storage::message_store::SharedMessageStore> {
+        self.message_store.as_ref()
+    }
+
+    pub fn store_message(&self, message: crate::core::message::Message) -> bool {
+        if let Some(store) = &self.message_store {
+            if let Ok(mut store) = store.lock() {
+                store.add_message(message);
+                return true;
+            }
+        }
+        false
+    }
+
+    // Parameterized constructor (controls the way store is injected)
+    pub fn with_message_store(message_store: storage::message_store::SharedMessageStore) -> Self {
+        Self {
+            connections: HashMap::new(),
+            message_store: Some(message_store)
+        }
+    }
+
+    pub fn get_recent_messages(&self, limit: usize) -> Vec<crate::core::message::Message> {
+        if let Some(store)  = &self.message_store {
+            if let Ok(store) = store.lock() {
+                return store.recent_messages(limit);
+            }
+        }
+        Vec::new()
     }
 
     // Register a new client connection
@@ -66,5 +106,6 @@ pub type Sessions = Arc<Mutex<SessionManager>>;
 
 // Create a new thread-safe session manager
 pub fn create_session_manager() -> Sessions {
-    Arc::new(Mutex::new(SessionManager::new()))
+    let message_store = storage::message_store::create_message_store();
+    Arc::new(Mutex::new(SessionManager::with_message_store(message_store)))
 }
