@@ -7,7 +7,6 @@ use log::{info, error, warn};
 
 use crate::core::session::{Sessions};
 use crate::core::message::{SocketMessage, Message as ChatMessage};
-use crate::core::connection::Connection;
 
 // Handle a WebSocket connection
 pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
@@ -43,6 +42,18 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
 
     if let Ok(msg_str) = serde_json::to_string(&connect_msg) {
         let _ = tx.send(Message::text(msg_str));
+    }
+
+    let recent_messages = {
+        let sessions_guard = sessions.lock().unwrap();
+        sessions_guard.get_recent_messages(10)
+    };
+
+    for msg in recent_messages {
+        let socket_msg = SocketMessage::Chat(msg);
+        if let Ok(msg_str) = serde_json::to_string(&socket_msg) {
+            let _ = tx.send(Message::text(msg_str));
+        }
     }
 
     // Handle incoming messages
@@ -89,15 +100,18 @@ async fn process_message(msg: Message, client_id: &str, sessions: &Sessions) {
     // Try to parse as a chat message
     match serde_json::from_str::<ChatMessage>(msg_str) {
         Ok(chat_msg) => {
-            // Create a SocketMessage to broadcast
-            let socket_msg = SocketMessage::Chat(chat_msg);
+            // Store the message
+            if let Ok(sessions_guard) = sessions.lock() {
+               sessions_guard.store_message(chat_msg.clone());
 
-            // Broadcast to all clients
-            if let Ok(sessions) = sessions.lock() {
-                let broadcast_count = sessions.broadcast(&socket_msg, client_id);
-                info!("Message from client {} broadcasted to {} clients", client_id, broadcast_count);
+                // Create a SocketMessage for broadcasting
+                let socket_msg = SocketMessage::Chat(chat_msg);
+
+                // Broadcast the message
+                let broadcast_count = sessions_guard.broadcast(&socket_msg, client_id);
+                info!("Broadcast message to {} clients from {}", broadcast_count, client_id);
             } else {
-                error!("Failed to acquire lock on sessions");
+                error!("Failed to parse chat message");
             }
         },
         Err(e) => {
