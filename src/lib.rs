@@ -6,6 +6,7 @@
 pub mod config;
 pub mod constants;
 pub mod core;
+pub mod error;
 pub mod handlers;
 pub mod storage;
 
