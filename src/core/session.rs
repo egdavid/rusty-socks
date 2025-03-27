@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use warp::ws::Message as WsMessage;
+use log::{error, debug, info};
 
 use crate::core::connection::Connection;
 use crate::core::message::SocketMessage;
 use crate::storage;
+use crate::error::{Result, RustySocksError};
 
 // Manages multiple client connections and their state
 pub struct SessionManager {
@@ -31,14 +33,15 @@ impl SessionManager {
         self.message_store.as_ref()
     }
 
-    pub fn store_message(&self, message: crate::core::message::Message) -> bool {
+    pub fn store_message(&self, message: crate::core::message::Message) -> Result<bool> {
         if let Some(store) = &self.message_store {
-            if let Ok(mut store) = store.lock() {
-                store.add_message(message);
-                return true;
-            }
+            let mut store_guard = store.lock()
+                .map_err(|e| RustySocksError::StorageError(format!("Failed to lock message store: {}", e)))?;
+            store_guard.add_message(message);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        false
     }
 
     // Parameterized constructor (controls the way store is injected)
@@ -49,27 +52,42 @@ impl SessionManager {
         }
     }
 
-    pub fn get_recent_messages(&self, limit: usize) -> Vec<crate::core::message::Message> {
-        if let Some(store)  = &self.message_store {
-            if let Ok(store) = store.lock() {
-                return store.recent_messages(limit);
-            }
+    pub fn get_recent_messages(&self, limit: usize) -> Result<Vec<crate::core::message::Message>> {
+        if let Some(store) = &self.message_store {
+            let store_guard = store.lock()
+                .map_err(|e| RustySocksError::StorageError(format!("Failed to lock message store: {}", e)))?;
+            Ok(store_guard.recent_messages(limit))
+        } else {
+            Ok(Vec::new())
         }
-        Vec::new()
     }
 
     // Register a new client connection
-    pub fn register(&mut self, id: String, sender: mpsc::UnboundedSender<WsMessage>) {
+    pub fn register(&mut self, id: String, sender: mpsc::UnboundedSender<WsMessage>) -> Result<()> {
         let connection = Connection::with_id(id.clone(), sender);
-        self.connections.insert(id, connection);
+        self.connections.insert(id.clone(), connection);
+        debug!("Client registered: {}", id);
+        Ok(())
     }
 
     // Remove a client connection
-    pub fn unregister(&mut self, id: &str) { self.connections.remove(id); }
+    pub fn unregister(&mut self, id: &str) -> Result<bool> {
+        let was_present = self.connections.remove(id).is_some();
+        if was_present {
+            debug!("Client unregistered: {}", id);
+        }
+        Ok(was_present)
+    }
 
     // Broadcast a message to all connected clients
     pub fn broadcast(&self, message: &SocketMessage, sender_id: &str) -> usize {
-        let message_str = serde_json::to_string(message).unwrap_or_default();
+        let message_str = match serde_json::to_string(message) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to serialize message: {}", e);
+                return 0;
+            }
+        };
         let ws_message = WsMessage::text(message_str);
 
         let mut success_count = 0;
@@ -104,8 +122,20 @@ impl SessionManager {
 // Thread-safe session manager wrapper
 pub type Sessions = Arc<Mutex<SessionManager>>;
 
-// Create a new thread-safe session manager
-pub fn create_session_manager() -> Sessions {
-    let message_store = storage::message_store::create_message_store();
-    Arc::new(Mutex::new(SessionManager::with_message_store(message_store)))
+pub fn create_session_manager() -> Result<Sessions> {
+    let message_store = storage::message_store::create_message_store()
+        .map_err(|e| RustySocksError::StorageError(format!("Failed to create message store: {}", e)))?;
+
+    let session_manager = SessionManager::with_message_store(message_store);
+    info!("Session manager created successfully");
+
+    Ok(Arc::new(Mutex::new(session_manager)))
+}
+
+// Helper function to safely get a session lock with error handling
+pub fn lock_sessions(sessions: &Sessions) -> Result<std::sync::MutexGuard<SessionManager>> {
+    match sessions.lock() {
+        Ok(guard) => Ok(guard),
+        Err(e) => Err(RustySocksError::SessionLock(format!("{}", e)))
+    }
 }

@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use crate::core::message::Message;
+use crate::error::RustySocksError;
 
 /// Maximum number of messages to store in memory
 const DEFAULT_MAX_MESSAGES: usize = 100;
@@ -33,7 +34,7 @@ impl MessageStore {
         }
     }
 
-    /// Add a message to the store, removing oldest if at capacity
+    /// Add a message to the store, removing the oldest if at capacity
     pub fn add_message(&mut self, message: Message) {
         // If at capacity, remove the oldest message
         if self.messages.len() >= self.max_size {
@@ -80,8 +81,12 @@ impl MessageStore {
 pub type SharedMessageStore = Arc<Mutex<MessageStore>>;
 
 /// Create a new thread-safe message store
-pub fn create_message_store() -> SharedMessageStore {
-    Arc::new(Mutex::new(MessageStore::new()))
+pub fn create_message_store() -> Result<SharedMessageStore, RustySocksError> {
+    let store = MessageStore::new();
+    let mutex_store = Mutex::new(store);
+    let arc_mutex_store = Arc::new(mutex_store);
+
+    Ok(arc_mutex_store)
 }
 
 /// Create a new thread-safe message store with custom capacity
