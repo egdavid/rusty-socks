@@ -1,5 +1,3 @@
-// tests/websocket_test.rs
-//
 // Integration test for Rusty Socks WebSocket server
 // This test validates the basic connection and message exchange functionality
 
@@ -39,12 +37,16 @@ impl Drop for ServerHandle {
 }
 
 // Start the WebSocket server for testing
-fn start_server(port: u16) -> ServerHandle {
+fn start_server(port: u16) -> Result<ServerHandle, String> {
     // Build the server if needed
-    let _ = Command::new("cargo")
+    let build_status = Command::new("cargo")
         .args(["build", "--bin", "rusty_socks"])
         .status()
-        .expect("Failed to build the server binary");
+        .map_err(|e| format!("Failed to execute build command: {}", e))?;
+
+    if !build_status.success() {
+        return Err(format!("Build process failed with exit code: {:?}", build_status.code()));
+    }
 
     println!("Starting server on port {}", port);
 
@@ -55,7 +57,7 @@ fn start_server(port: u16) -> ServerHandle {
         .env("RUSTY_SOCKS_PORT", port.to_string())
         .env("RUST_LOG", "debug")
         .spawn()
-        .expect("Failed to start Rusty Socks server");
+        .map_err(|e| format!("Failed to start Rusty Socks server: {}", e))?;
 
     // Allow time for server initialization
     thread::sleep(Duration::from_secs(5));
@@ -69,16 +71,22 @@ fn start_server(port: u16) -> ServerHandle {
         Err(e) => println!("Warning: Unable to verify server status: {}", e)
     }
 
-    ServerHandle { process, port }
+    Ok(ServerHandle { process, port })
 }
 
+// Test WebSocket connection establishment and basic message exchange
 #[test]
 fn test_websocket_connection_and_messaging() {
     // Start server on a specific port
     let port = 3031;
-    let _server = start_server(port);
+    let _server = match start_server(port) {
+        Ok(server) => server,
+        Err(e) => {
+            panic!("Failed to start test server: {}", e);
+        }
+    };
 
-    // First check server health outside of async context
+    // First check server health outside async context
     // This avoids runtime conflicts with blocking calls
     let health_check = reqwest::blocking::Client::new()
         .get(format!("http://127.0.0.1:{}/health", port))
@@ -91,7 +99,12 @@ fn test_websocket_connection_and_messaging() {
     }
 
     // Create Tokio runtime for async operations
-    let rt = Runtime::new().expect("Failed to create Tokio runtime");
+    let rt = match Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            panic!("Failed to create Tokio runtime: {}", e);
+        }
+    };
 
     // Run the WebSocket test
     rt.block_on(async {
@@ -103,31 +116,48 @@ fn test_websocket_connection_and_messaging() {
 
         // Establish WebSocket connection with explicit timeout
         // This prevents indefinite blocking if server doesn't respond
-        let (mut ws_stream, _) = tokio::time::timeout(
+        let (mut ws_stream, _) = match tokio::time::timeout(
             Duration::from_secs(5),
             connect_async(url)
-        ).await
-            .expect("WebSocket connection timeout")
-            .expect("Failed to establish WebSocket connection");
+        ).await {
+            Ok(conn_result) => match conn_result {
+                Ok(ws) => ws,
+                Err(e) => {
+                    panic!("Failed to establish WebSocket connection: {}", e);
+                }
+            },
+            Err(_) => {
+                panic!("WebSocket connection timeout after 5 seconds");
+            }
+        };
 
         println!("WebSocket connection established");
 
         // First, we should receive a connection confirmation message
-        if let Some(msg) = ws_stream.next().await {
-            let msg = msg.expect("Error receiving welcome message");
-            assert!(msg.is_text(), "Expected text message for welcome");
+        let welcome_message = match ws_stream.next().await {
+            Some(result) => match result {
+                Ok(msg) => msg,
+                Err(e) => panic!("Error receiving welcome message: {}", e)
+            },
+            None => panic!("Did not receive welcome message, connection closed unexpectedly")
+        };
 
-            // Parse the welcome message JSON
-            let msg_text = msg.into_text().expect("Failed to convert message to text");
-            let msg_json: Value = serde_json::from_str(&msg_text)
-                .expect("Failed to parse welcome message JSON");
+        assert!(welcome_message.is_text(), "Expected text message for welcome");
 
-            // Check message structure
-            assert!(msg_json.get("type").is_some(), "Missing 'type' field in welcome message");
-            assert_eq!(msg_json["type"], "Connect", "Expected Connect message type");
-        } else {
-            panic!("Did not receive welcome message");
-        }
+        // Parse the welcome message JSON
+        let msg_text = match welcome_message.into_text() {
+            Ok(text) => text,
+            Err(e) => panic!("Failed to convert message to text: {}", e)
+        };
+
+        let msg_json: Value = match serde_json::from_str(&msg_text) {
+            Ok(json) => json,
+            Err(e) => panic!("Failed to parse welcome message JSON: {}", e)
+        };
+
+        // Check message structure
+        assert!(msg_json.get("type").is_some(), "Missing 'type' field in welcome message");
+        assert_eq!(msg_json["type"], "Connect", "Expected Connect message type");
 
         // Create a test message that matches expected server structure
         let test_message = json!({
@@ -139,9 +169,9 @@ fn test_websocket_connection_and_messaging() {
 
         // Send the test message
         let message_str = test_message.to_string();
-        ws_stream.send(Message::Text(message_str))
-            .await
-            .expect("Failed to send test message");
+        if let Err(e) = ws_stream.send(Message::Text(message_str)).await {
+            panic!("Failed to send test message: {}", e);
+        }
 
         println!("Test message sent");
 
@@ -149,7 +179,10 @@ fn test_websocket_connection_and_messaging() {
         match tokio::time::timeout(Duration::from_secs(3), ws_stream.next()).await {
             Ok(Some(Ok(msg))) => {
                 if msg.is_text() {
-                    println!("Received response: {}", msg.into_text().unwrap());
+                    match msg.into_text() {
+                        Ok(text) => println!("Received response: {}", text),
+                        Err(e) => println!("Failed to convert response to text: {}", e)
+                    }
                 } else {
                     println!("Received non-text response");
                 }
@@ -160,31 +193,50 @@ fn test_websocket_connection_and_messaging() {
         }
 
         // Close the connection gracefully
-        ws_stream.close(None).await.expect("Failed to close WebSocket connection");
+        if let Err(e) = ws_stream.close(None).await {
+            println!("Warning: Failed to close WebSocket connection gracefully: {}", e);
+        }
     });
 }
 
+// Test the server health endpoint to ensure basic HTTP functionality
 #[test]
 fn test_server_health_endpoint() {
     // Start server on a different port
     let port = 3032;
-    let _server = start_server(port);
+    let _server = match start_server(port) {
+        Ok(server) => server,
+        Err(e) => {
+            panic!("Failed to start test server: {}", e);
+        }
+    };
 
     // Create Tokio runtime
-    let rt = Runtime::new().expect("Failed to create Tokio runtime");
+    let rt = match Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            panic!("Failed to create Tokio runtime: {}", e);
+        }
+    };
 
     // Test the health endpoint
     rt.block_on(async {
         let client = reqwest::Client::new();
-        let response = client.get(format!("http://127.0.0.1:{}/health", port))
+        let response = match client.get(format!("http://127.0.0.1:{}/health", port))
             .timeout(Duration::from_secs(5))
             .send()
-            .await
-            .expect("Failed to send request to health endpoint");
+            .await {
+            Ok(resp) => resp,
+            Err(e) => panic!("Failed to send request to health endpoint: {}", e)
+        };
 
         assert!(response.status().is_success(), "Health endpoint returned non-success status");
 
-        let body = response.text().await.expect("Failed to read response body");
+        let body = match response.text().await {
+            Ok(text) => text,
+            Err(e) => panic!("Failed to read response body: {}", e)
+        };
+
         assert_eq!(body, "OK", "Health endpoint response should be 'OK'");
     });
 }
