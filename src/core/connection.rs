@@ -1,11 +1,11 @@
 //! WebSocket connection management
 //! Handles the lifecycle of client connections
 
+use log::warn;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use warp::ws::Message;
-use std::time::{Instant, Duration};
-use log::warn;
 
 /// Represents the state of a single WebSocket connection
 pub struct Connection {

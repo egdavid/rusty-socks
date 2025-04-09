@@ -3,13 +3,13 @@
 //! This module provides a configurable thread pool to efficiently manage
 //! concurrent client connections and message processing tasks.
 
+use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::{Builder, Runtime};
 use tokio::task::JoinHandle;
-use log::{info, error, warn};
 
-use crate::error::{Result, RustySocksError};
 use crate::config::ServerConfig;
+use crate::error::{Result, RustySocksError};
 
 /// Represents a thread pool for executing WebSocket related tasks
 pub struct ThreadPool {
@@ -41,15 +41,21 @@ impl ThreadPool {
             .enable_io()
             .enable_time()
             .thread_name("rusty-socks-worker")
-            .build() {
+            .build()
+        {
             Ok(rt) => rt,
-            Err(e) => return Err(RustySocksError::SystemError(format!(
-                "Failed to build thread pool runtime: {}", e
-            )))
+            Err(e) => {
+                return Err(RustySocksError::SystemError(format!(
+                    "Failed to build thread pool runtime: {}",
+                    e
+                )))
+            }
         };
 
-        info!("Created thread pool with {} worker threads and {} max queued tasks",
-              actual_workers, max_queued_tasks);
+        info!(
+            "Created thread pool with {} worker threads and {} max queued tasks",
+            actual_workers, max_queued_tasks
+        );
 
         Ok(Self {
             runtime: Arc::new(runtime),
@@ -67,10 +73,7 @@ impl ThreadPool {
     /// # Returns
     /// A `Result` containing the `ThreadPool` or an error
     pub fn from_config(config: &ServerConfig) -> Result<Self> {
-        Self::new(
-            config.thread_pool_size,
-            config.max_queued_tasks
-        )
+        Self::new(config.thread_pool_size, config.max_queued_tasks)
     }
 
     /// Execute a future on the thread pool
@@ -96,7 +99,10 @@ impl ThreadPool {
         };
 
         if *active_count >= self.max_queued_tasks {
-            warn!("Thread pool at capacity ({} active tasks), rejecting new task", *active_count);
+            warn!(
+                "Thread pool at capacity ({} active tasks), rejecting new task",
+                *active_count
+            );
             return None;
         }
 
@@ -121,10 +127,9 @@ impl ThreadPool {
 
     /// Get the current number of active tasks
     pub fn active_task_count(&self) -> Result<usize> {
-        let count = self.active_tasks.lock()
-            .map_err(|e| RustySocksError::SystemError(format!(
-                "Failed to access active tasks counter: {}", e
-            )))?;
+        let count = self.active_tasks.lock().map_err(|e| {
+            RustySocksError::SystemError(format!("Failed to access active tasks counter: {}", e))
+        })?;
 
         Ok(*count)
     }
@@ -137,7 +142,10 @@ impl ThreadPool {
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        info!("Shutting down thread pool with {} worker threads", self.worker_count);
+        info!(
+            "Shutting down thread pool with {} worker threads",
+            self.worker_count
+        );
     }
 }
 
@@ -174,15 +182,19 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let handle = pool.execute(async {
-                sleep(Duration::from_millis(100)).await;
-                42
-            }).expect("Failed to execute task");
+            let handle = pool
+                .execute(async {
+                    sleep(Duration::from_millis(100)).await;
+                    42
+                })
+                .expect("Failed to execute task");
 
             let result = handle.await.expect("Task failed");
             assert_eq!(result, 42);
 
-            let active = pool.active_task_count().expect("Failed to get active count");
+            let active = pool
+                .active_task_count()
+                .expect("Failed to get active count");
             assert_eq!(active, 0);
         });
     }

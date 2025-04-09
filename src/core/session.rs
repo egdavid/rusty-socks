@@ -1,25 +1,25 @@
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use warp::ws::Message as WsMessage;
-use log::{error, debug, info};
 
 use crate::core::connection::Connection;
 use crate::core::message::SocketMessage;
-use crate::storage;
 use crate::error::{Result, RustySocksError};
+use crate::storage;
 
 // Manages multiple client connections and their state
 pub struct SessionManager {
     connections: HashMap<String, Connection>,
-    message_store: Option<storage::message_store::SharedMessageStore>
+    message_store: Option<storage::message_store::SharedMessageStore>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
             connections: HashMap::new(),
-            message_store: None
+            message_store: None,
         }
     }
 
@@ -35,8 +35,9 @@ impl SessionManager {
 
     pub fn store_message(&self, message: crate::core::message::Message) -> Result<bool> {
         if let Some(store) = &self.message_store {
-            let mut store_guard = store.lock()
-                .map_err(|e| RustySocksError::StorageError(format!("Failed to lock message store: {}", e)))?;
+            let mut store_guard = store.lock().map_err(|e| {
+                RustySocksError::StorageError(format!("Failed to lock message store: {}", e))
+            })?;
             store_guard.add_message(message);
             Ok(true)
         } else {
@@ -48,14 +49,15 @@ impl SessionManager {
     pub fn with_message_store(message_store: storage::message_store::SharedMessageStore) -> Self {
         Self {
             connections: HashMap::new(),
-            message_store: Some(message_store)
+            message_store: Some(message_store),
         }
     }
 
     pub fn get_recent_messages(&self, limit: usize) -> Result<Vec<crate::core::message::Message>> {
         if let Some(store) = &self.message_store {
-            let store_guard = store.lock()
-                .map_err(|e| RustySocksError::StorageError(format!("Failed to lock message store: {}", e)))?;
+            let store_guard = store.lock().map_err(|e| {
+                RustySocksError::StorageError(format!("Failed to lock message store: {}", e))
+            })?;
             Ok(store_guard.recent_messages(limit))
         } else {
             Ok(Vec::new())
@@ -123,8 +125,9 @@ impl SessionManager {
 pub type Sessions = Arc<Mutex<SessionManager>>;
 
 pub fn create_session_manager() -> Result<Sessions> {
-    let message_store = storage::message_store::create_message_store()
-        .map_err(|e| RustySocksError::StorageError(format!("Failed to create message store: {}", e)))?;
+    let message_store = storage::message_store::create_message_store().map_err(|e| {
+        RustySocksError::StorageError(format!("Failed to create message store: {}", e))
+    })?;
 
     let session_manager = SessionManager::with_message_store(message_store);
     info!("Session manager created successfully");
@@ -136,6 +139,6 @@ pub fn create_session_manager() -> Result<Sessions> {
 pub fn lock_sessions(sessions: &Sessions) -> Result<std::sync::MutexGuard<SessionManager>> {
     match sessions.lock() {
         Ok(guard) => Ok(guard),
-        Err(e) => Err(RustySocksError::SessionLock(format!("{}", e)))
+        Err(e) => Err(RustySocksError::SessionLock(format!("{}", e))),
     }
 }

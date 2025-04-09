@@ -1,7 +1,7 @@
+use log::{error, info, warn};
 use std::convert::Infallible;
-use warp::{self, Filter};
-use log::{info, error, warn};
 use std::net::SocketAddr;
+use warp::{self, Filter};
 
 use rusty_socks::config::ServerConfig;
 use rusty_socks::constants::WS_PATH;
@@ -15,7 +15,7 @@ async fn main() {
     // Initialize env
     match dotenv::dotenv() {
         Ok(_) => info!("Environment variables loaded from .env file"),
-        Err(e) => warn!("Failed to load .env file: {}", e)
+        Err(e) => warn!("Failed to load .env file: {}", e),
     };
 
     // Initialize logging
@@ -41,7 +41,10 @@ async fn main() {
         }
     };
 
-    info!("Thread pool created with {} worker threads", thread_pool.worker_count());
+    info!(
+        "Thread pool created with {} worker threads",
+        thread_pool.worker_count()
+    );
 
     // Create WebSocket route with thread pool
     let ws_route = warp::path(WS_PATH)
@@ -55,7 +58,7 @@ async fn main() {
                 let handle_client = handle_ws_client(socket, sessions);
                 match thread_pool.execute(handle_client) {
                     Some(_) => info!("WebSocket connection processing assigned to thread pool"),
-                    None => error!("Thread pool is at capacity, connection rejected")
+                    None => error!("Thread pool is at capacity, connection rejected"),
                 }
 
                 // Since we are now using the thread pool to handle the WebSocket client,
@@ -65,15 +68,13 @@ async fn main() {
         });
 
     // Create health check route
-    let health_route = warp::path("health")
-        .map(|| "OK");
+    let health_route = warp::path("health").map(|| "OK");
 
     // Create thread pool stats route
     let stats_route = warp::path("stats")
         .and(with_thread_pool(thread_pool.clone()))
         .map(|thread_pool: SharedThreadPool| {
-            let active_tasks = thread_pool.active_task_count()
-                .unwrap_or(0);
+            let active_tasks = thread_pool.active_task_count().unwrap_or(0);
             warp::reply::json(&serde_json::json!({
                 "worker_threads": thread_pool.worker_count(),
                 "active_tasks": active_tasks
@@ -95,24 +96,24 @@ async fn main() {
     // Start the server
     info!("Starting Rusty Socks server on {}", addr);
 
-    warp::serve(routes)
-        .run(addr)
-        .await;
+    warp::serve(routes).run(addr).await;
 }
 
 // Helper function to include sessions state in request
-fn with_sessions(sessions: Result<Sessions, rusty_socks::error::RustySocksError>)
-                 -> impl Filter<Extract = (Sessions,), Error = Infallible> + Clone
-{
-    warp::any().map(move || sessions.clone().unwrap_or_else(|e| {
-        error!("Failed to initialize sessions: {}", e);
-        panic!("Cannot proceed without sessions")
-    }))
+fn with_sessions(
+    sessions: Result<Sessions, rusty_socks::error::RustySocksError>,
+) -> impl Filter<Extract = (Sessions,), Error = Infallible> + Clone {
+    warp::any().map(move || {
+        sessions.clone().unwrap_or_else(|e| {
+            error!("Failed to initialize sessions: {}", e);
+            panic!("Cannot proceed without sessions")
+        })
+    })
 }
 
 // Helper function to include thread pool in request
-fn with_thread_pool(thread_pool: SharedThreadPool)
-                    -> impl Filter<Extract = (SharedThreadPool,), Error = Infallible> + Clone
-{
+fn with_thread_pool(
+    thread_pool: SharedThreadPool,
+) -> impl Filter<Extract = (SharedThreadPool,), Error = Infallible> + Clone {
     warp::any().map(move || thread_pool.clone())
 }

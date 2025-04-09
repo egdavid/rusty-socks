@@ -1,9 +1,11 @@
 //! Server configuration module
 //! Handles dynamic configuration parameters for the WebSocket server
 
+use crate::constants::{
+    DEFAULT_HOST, DEFAULT_MAX_QUEUED_TASKS, DEFAULT_PORT, DEFAULT_THREAD_POOL_SIZE,
+};
 use std::env;
 use std::time::Duration;
-use crate::constants::{DEFAULT_HOST, DEFAULT_PORT, DEFAULT_THREAD_POOL_SIZE, DEFAULT_MAX_QUEUED_TASKS};
 
 /// Server configuration parameters
 #[derive(Debug, Clone)]
@@ -25,12 +27,12 @@ impl Default for ServerConfig {
         Self {
             host: DEFAULT_HOST.to_string(),
             port: DEFAULT_PORT,
-            max_connections: 100,  // Default maximum number of simultaneous connections
-            buffer_size: 1024,     // Default buffer size for messages
+            max_connections: 100, // Default maximum number of simultaneous connections
+            buffer_size: 1024,    // Default buffer size for messages
             connection_timeout: Duration::from_secs(60), // 1 minute timeout
-            ping_interval: Duration::from_secs(30),      // 30 seconds ping interval
-            thread_pool_size: DEFAULT_THREAD_POOL_SIZE,  // Default worker threads count
-            max_queued_tasks: DEFAULT_MAX_QUEUED_TASKS,  // Default maximum queued tasks
+            ping_interval: Duration::from_secs(30), // 30 seconds ping interval
+            thread_pool_size: DEFAULT_THREAD_POOL_SIZE, // Default worker threads count
+            max_queued_tasks: DEFAULT_MAX_QUEUED_TASKS, // Default maximum queued tasks
         }
     }
 }
