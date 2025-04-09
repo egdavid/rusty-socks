@@ -6,12 +6,12 @@ use std::net::SocketAddr;
 use rusty_socks::config::ServerConfig;
 use rusty_socks::constants::WS_PATH;
 use rusty_socks::core::session::create_session_manager;
-use rusty_socks::core::Sessions;
+use rusty_socks::core::thread_pool::create_thread_pool;
+use rusty_socks::core::{Sessions, SharedThreadPool};
 use rusty_socks::handlers::websocket::handle_ws_client;
 
 #[tokio::main]
 async fn main() {
-
     // Initialize env
     match dotenv::dotenv() {
         Ok(_) => info!("Environment variables loaded from .env file"),
@@ -24,26 +24,64 @@ async fn main() {
     // Load config from .env
     let config = ServerConfig::from_env();
 
-    info!("Configuration: host={}, port={}", config.host, config.port);
+    info!(
+        "Configuration: host={}, port={}, thread_pool_size={}",
+        config.host, config.port, config.thread_pool_size
+    );
 
     // Create session manager
     let sessions = create_session_manager();
 
-    // Create WebSocket route
+    // Create thread pool
+    let thread_pool = match create_thread_pool(&config) {
+        Ok(pool) => pool,
+        Err(e) => {
+            error!("Failed to create thread pool: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    info!("Thread pool created with {} worker threads", thread_pool.worker_count());
+
+    // Create WebSocket route with thread pool
     let ws_route = warp::path(WS_PATH)
         .and(warp::ws())
         .and(with_sessions(sessions.clone()))
-        .map(|ws: warp::ws::Ws, sessions| {
+        .and(with_thread_pool(thread_pool.clone()))
+        .map(|ws: warp::ws::Ws, sessions, thread_pool| {
             info!("New websocket connection");
-            ws.on_upgrade(move |socket| handle_ws_client(socket, sessions))
+            ws.on_upgrade(move |socket| {
+                // Use the thread pool to handle the WebSocket client
+                let handle_client = handle_ws_client(socket, sessions);
+                match thread_pool.execute(handle_client) {
+                    Some(_) => info!("WebSocket connection processing assigned to thread pool"),
+                    None => error!("Thread pool is at capacity, connection rejected")
+                }
+
+                // Since we are now using the thread pool to handle the WebSocket client,
+                // we need to return a future that completes immediately
+                async {}
+            })
         });
 
     // Create health check route
     let health_route = warp::path("health")
         .map(|| "OK");
 
+    // Create thread pool stats route
+    let stats_route = warp::path("stats")
+        .and(with_thread_pool(thread_pool.clone()))
+        .map(|thread_pool: SharedThreadPool| {
+            let active_tasks = thread_pool.active_task_count()
+                .unwrap_or(0);
+            warp::reply::json(&serde_json::json!({
+                "worker_threads": thread_pool.worker_count(),
+                "active_tasks": active_tasks
+            }))
+        });
+
     // Combine routes
-    let routes = ws_route.or(health_route);
+    let routes = ws_route.or(health_route).or(stats_route);
 
     // Build the server address
     let addr: SocketAddr = match format!("{}:{}", config.host, config.port).parse() {
@@ -57,8 +95,6 @@ async fn main() {
     // Start the server
     info!("Starting Rusty Socks server on {}", addr);
 
-    // Note: Warp's serve().run() doesn't return a result, so we can't directly handle errors here.
-    // TODO: Implement custom error handlers or a middleware for error handling during server operation
     warp::serve(routes)
         .run(addr)
         .await;
@@ -72,4 +108,11 @@ fn with_sessions(sessions: Result<Sessions, rusty_socks::error::RustySocksError>
         error!("Failed to initialize sessions: {}", e);
         panic!("Cannot proceed without sessions")
     }))
+}
+
+// Helper function to include thread pool in request
+fn with_thread_pool(thread_pool: SharedThreadPool)
+                    -> impl Filter<Extract = (SharedThreadPool,), Error = Infallible> + Clone
+{
+    warp::any().map(move || thread_pool.clone())
 }
