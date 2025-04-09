@@ -3,10 +3,10 @@
 //! This implementation provides a basic circular buffer for storing
 //! recent messages without persisting to disk.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use crate::core::message::Message;
 use crate::error::RustySocksError;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 /// Maximum number of messages to store in memory
 const DEFAULT_MAX_MESSAGES: usize = 100;

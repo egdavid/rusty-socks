@@ -1,12 +1,12 @@
-use tokio::sync::mpsc;
-use futures_util::stream::StreamExt;
 use futures_util::sink::SinkExt;
-use warp::ws::{Message, WebSocket};
+use futures_util::stream::StreamExt;
+use log::{debug, error, info, warn};
+use tokio::sync::mpsc;
 use uuid::Uuid;
-use log::{info, error, warn, debug};
+use warp::ws::{Message, WebSocket};
 
-use crate::core::session::{Sessions, lock_sessions};
-use crate::core::message::{SocketMessage, Message as ChatMessage};
+use crate::core::message::{Message as ChatMessage, SocketMessage};
+use crate::core::session::{lock_sessions, Sessions};
 use crate::error::RustySocksError;
 
 // Handle a WebSocket connection
@@ -49,7 +49,7 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
 
     // Send a welcome message to the client
     let connect_msg = SocketMessage::Connect {
-        client_id: client_id.clone()
+        client_id: client_id.clone(),
     };
 
     match serde_json::to_string(&connect_msg) {
@@ -57,7 +57,7 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
             if let Err(e) = tx.send(Message::text(msg_str)) {
                 error!("Failed to send welcome message: {}", e);
             }
-        },
+        }
         Err(e) => {
             error!("Failed to serialize connect message: {}", e);
         }
@@ -83,7 +83,7 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
                 if let Err(e) = tx.send(Message::text(msg_str)) {
                     error!("Failed to send recent message: {}", e);
                 }
-            },
+            }
             Err(e) => {
                 error!("Failed to serialize recent message: {}", e);
             }
@@ -116,7 +116,7 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
                     info!("Client disconnected: {}", client_id);
                     info!("Current connections: {}", sessions_guard.client_count());
                 }
-            },
+            }
             Err(e) => {
                 error!("Failed to acquire sessions lock for unregistration: {}", e);
             }
@@ -125,16 +125,22 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
 
     // Broadcast disconnect message
     let disconnect_msg = SocketMessage::Disconnect {
-        client_id: client_id.clone()
+        client_id: client_id.clone(),
     };
 
     match lock_sessions(&sessions) {
         Ok(sessions_guard) => {
             let broadcast_count = sessions_guard.broadcast(&disconnect_msg, &client_id);
-            debug!("Broadcast disconnect message to {} clients", broadcast_count);
-        },
+            debug!(
+                "Broadcast disconnect message to {} clients",
+                broadcast_count
+            );
+        }
         Err(e) => {
-            error!("Failed to acquire sessions lock for disconnect broadcast: {}", e);
+            error!(
+                "Failed to acquire sessions lock for disconnect broadcast: {}",
+                e
+            );
         }
     }
 }
@@ -163,18 +169,24 @@ async fn process_message(msg: Message, client_id: &str, sessions: &Sessions) {
 
                             // Broadcast the message
                             let broadcast_count = sessions_guard.broadcast(&socket_msg, client_id);
-                            info!("Broadcast message to {} clients from {}", broadcast_count, client_id);
-                        },
+                            info!(
+                                "Broadcast message to {} clients from {}",
+                                broadcast_count, client_id
+                            );
+                        }
                         Err(e) => {
                             error!("Failed to store message: {}", e);
                         }
                     }
-                },
+                }
                 Err(e) => {
-                    error!("Failed to acquire sessions lock for message processing: {}", e);
+                    error!(
+                        "Failed to acquire sessions lock for message processing: {}",
+                        e
+                    );
                 }
             }
-        },
+        }
         Err(e) => {
             warn!("Failed to parse message: {}", e);
         }
