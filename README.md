@@ -6,20 +6,25 @@ A lightweight WebSocket server implemented in Rust!
 
 Rusty Socks is a 'high-performance' WebSocket server built with Rust, designed for real-time communication applications. It provides a viable foundation for building WebSocket-based services with features like:
 
-- Session management
-- Message broadcasting
-- In-memory message storage
-- Health monitoring
-- Configurable thread pool for concurrent connections
+- **Room & Channel Management**: Create and manage multiple chat rooms with member isolation
+- **Authentication & Authorization**: JWT-based authentication with role-based permissions
+- **User Roles & Permissions**: Owner, Admin, Moderator, Member, and Guest roles with granular permissions
+- **Moderation Tools**: Ban, mute, and kick users with optional expiration times
+- **Session Management**: Thread-safe connection and session handling
+- **Message Broadcasting**: Efficient message routing to room members
+- **In-memory Storage**: Fast message buffering with circular storage
+- **Thread Pool**: Configurable worker threads for optimal concurrent connection handling
+- **Health Monitoring**: Real-time server statistics and health endpoints
 - More to come...
 
 ## Architecture
 
 The server is built on the following components:
 
-- **Core**: Session management, connection handling, message processing, and thread pooling
-- **Handlers**: WebSocket and HTTP request processing
-- **Storage**: Simple in-memory message persistence
+- **Authentication**: JWT token management with role-based access control
+- **Core**: Room management, session handling, connection processing, and thread pooling
+- **Handlers**: WebSocket and HTTP request processing with authentication
+- **Storage**: Simple in-memory message persistence with room isolation
 - **Configuration**: Dynamic server settings through environment variables
 
 ## Prerequisites
@@ -51,6 +56,7 @@ Rusty Socks can be configured using environment variables:
 | RUSTY_SOCKS_PING | Ping interval in seconds | 30 |
 | RUSTY_SOCKS_THREAD_POOL_SIZE | Number of worker threads in the pool | 4 |
 | RUSTY_SOCKS_MAX_QUEUED_TASKS | Maximum number of tasks that can be queued | 1000 |
+| RUSTY_SOCKS_JWT_SECRET | Secret key for JWT token signing | "your-secret-key" |
 
 ## Usage
 
@@ -102,38 +108,103 @@ Rusty Socks uses a thread pool to efficiently manage multiple concurrent WebSock
 
 This connection rejection mechanism is a deliberate design choice to maintain server stability and responsiveness for existing connections during peak loads, rather than risking degraded performance for all users.
 
+### Authentication
+
+Rusty Socks uses JWT tokens for authentication. To connect to the WebSocket server:
+
+1. **Obtain a JWT token** (implement your own authentication endpoint)
+2. **Include the token** in the WebSocket connection URL as a query parameter:
+   ```
+   ws://localhost:3030/ws?token=your_jwt_token_here
+   ```
+
 ### Client example (JavaScript)
 
 ```javascript
-const socket = new WebSocket('ws://localhost:3030/ws');
+// Assuming you have a JWT token from your auth system
+const token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...';
+const socket = new WebSocket(`ws://localhost:3030/ws?token=${token}`);
 
 socket.onopen = function() {
   console.log('Connected to Rusty Socks server');
   
-  // Send a message
+  // Join a room
+  const joinMessage = {
+    type: 'join_room',
+    room_id: 'general',
+    password: null // optional for password-protected rooms
+  };
+  socket.send(JSON.stringify(joinMessage));
+  
+  // Send a message to the room
   const message = {
-    sender: 'client',
+    type: 'room_message',
+    room_id: 'general',
     content: 'Hello from JS client',
     timestamp: new Date().toISOString()
   };
-  
   socket.send(JSON.stringify(message));
 };
 
 socket.onmessage = function(event) {
   const message = JSON.parse(event.data);
   console.log('Received:', message);
+  
+  // Handle different message types
+  switch(message.type) {
+    case 'room_message':
+      console.log(`[${message.room_id}] ${message.sender}: ${message.content}`);
+      break;
+    case 'user_joined':
+      console.log(`${message.username} joined ${message.room_id}`);
+      break;
+    case 'error':
+      console.error('Server error:', message.message);
+      break;
+  }
 };
 
 socket.onclose = function() {
   console.log('Connection closed');
 };
 
-// Handle connection errors and implement retry logic
 socket.onerror = function(error) {
   console.error('WebSocket error:', error);
   // Implement exponential backoff retry here
 };
+```
+
+### Room Management
+
+Users with appropriate permissions can manage rooms:
+
+```javascript
+// Create a new room (requires ManageRoom permission)
+const createRoom = {
+  type: 'create_room',
+  name: 'My Private Room',
+  is_private: true,
+  max_members: 50
+};
+socket.send(JSON.stringify(createRoom));
+
+// Set user role (requires ManageRoles permission)
+const setRole = {
+  type: 'set_user_role',
+  room_id: 'general',
+  user_id: 'target_user_id',
+  role: 'Moderator'
+};
+socket.send(JSON.stringify(setRole));
+
+// Ban user (requires BanUsers permission)
+const banUser = {
+  type: 'ban_user',
+  room_id: 'general',
+  user_id: 'target_user_id',
+  duration_hours: 24 // optional, null for permanent
+};
+socket.send(JSON.stringify(banUser));
 ```
 
 ## Performance

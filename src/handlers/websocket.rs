@@ -7,7 +7,6 @@ use warp::ws::{Message, WebSocket};
 
 use crate::core::message::{Message as ChatMessage, SocketMessage};
 use crate::core::session::{lock_sessions, Sessions};
-use crate::error::RustySocksError;
 
 // Handle a WebSocket connection
 pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
@@ -151,7 +150,7 @@ async fn process_message(msg: Message, client_id: &str, sessions: &Sessions) {
     let msg_str = match msg.to_str() {
         Ok(s) => s,
         Err(e) => {
-            warn!("Failed to extract text from message: {}", e);
+            warn!("Failed to extract text from message: {:?}", e);
             return;
         }
     };
