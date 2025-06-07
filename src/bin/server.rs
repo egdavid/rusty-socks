@@ -57,21 +57,23 @@ async fn main() {
         .and(warp::ws())
         .and(with_sessions(sessions.clone()))
         .and(with_thread_pool(thread_pool.clone()))
-        .map(|ws: warp::ws::Ws, sessions: Sessions, thread_pool: SharedThreadPool| {
-            info!("New websocket connection");
-            ws.on_upgrade(move |socket| {
-                // Use the thread pool to handle the WebSocket client
-                let handle_client = handle_ws_client(socket, sessions);
-                match thread_pool.execute(handle_client) {
-                    Some(_) => info!("WebSocket connection processing assigned to thread pool"),
-                    None => error!("Thread pool is at capacity, connection rejected"),
-                }
+        .map(
+            |ws: warp::ws::Ws, sessions: Sessions, thread_pool: SharedThreadPool| {
+                info!("New websocket connection");
+                ws.on_upgrade(move |socket| {
+                    // Use the thread pool to handle the WebSocket client
+                    let handle_client = handle_ws_client(socket, sessions);
+                    match thread_pool.execute(handle_client) {
+                        Some(_) => info!("WebSocket connection processing assigned to thread pool"),
+                        None => error!("Thread pool is at capacity, connection rejected"),
+                    }
 
-                // Since we are now using the thread pool to handle the WebSocket client,
-                // we need to return a future that completes immediately
-                async {}
-            })
-        });
+                    // Since we are now using the thread pool to handle the WebSocket client,
+                    // we need to return a future that completes immediately
+                    async {}
+                })
+            },
+        );
 
     // Create health check route
     let health_route = warp::path("health").map(|| "OK");

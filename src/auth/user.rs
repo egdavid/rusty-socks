@@ -40,13 +40,8 @@ impl UserRole {
                 Permission::SendMessages,
                 Permission::DeleteMessages,
             ],
-            UserRole::Member => vec![
-                Permission::SendMessages,
-                Permission::InviteUsers,
-            ],
-            UserRole::Guest => vec![
-                Permission::SendMessages,
-            ],
+            UserRole::Member => vec![Permission::SendMessages, Permission::InviteUsers],
+            UserRole::Guest => vec![Permission::SendMessages],
         }
     }
 
@@ -59,14 +54,14 @@ impl UserRole {
 /// Permissions that can be granted to users
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Permission {
-    ManageRoom,      // Create, delete, configure rooms
-    ManageRoles,     // Assign/remove roles
-    KickUsers,       // Remove users from room
-    BanUsers,        // Ban users from room
-    MuteUsers,       // Mute users in room
-    SendMessages,    // Send messages to room
-    DeleteMessages,  // Delete any message
-    InviteUsers,     // Invite users to room
+    ManageRoom,     // Create, delete, configure rooms
+    ManageRoles,    // Assign/remove roles
+    KickUsers,      // Remove users from room
+    BanUsers,       // Ban users from room
+    MuteUsers,      // Mute users in room
+    SendMessages,   // Send messages to room
+    DeleteMessages, // Delete any message
+    InviteUsers,    // Invite users to room
 }
 
 /// Represents an authenticated user

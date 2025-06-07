@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::auth::user::{UserRole, Permission};
+use crate::auth::user::{Permission, UserRole};
 use crate::error::{Result, RustySocksError};
 
 /// Represents a chat room or channel
@@ -74,14 +74,14 @@ impl Room {
                 return Err(RustySocksError::RoomFull);
             }
         }
-        
+
         self.members.insert(client_id.clone());
-        
+
         // Assign default role if not already assigned
         if !self.user_roles.contains_key(&client_id) {
             self.user_roles.insert(client_id, UserRole::Member);
         }
-        
+
         Ok(())
     }
 
@@ -193,10 +193,10 @@ impl RoomManager {
     pub fn new() -> Self {
         let default_room = Room::new("lobby".to_string());
         let default_room_id = default_room.id.clone();
-        
+
         let mut rooms = HashMap::new();
         rooms.insert(default_room_id.clone(), default_room);
-        
+
         Self {
             rooms: Arc::new(RwLock::new(rooms)),
             client_rooms: Arc::new(RwLock::new(HashMap::new())),
@@ -210,10 +210,10 @@ impl RoomManager {
             Some(limit) => Room::with_limit(name, limit),
             None => Room::new(name),
         };
-        
+
         let room_id = room.id.clone();
         self.rooms.write().await.insert(room_id.clone(), room);
-        
+
         Ok(room_id)
     }
 
@@ -242,7 +242,8 @@ impl RoomManager {
     pub async fn join_room(&self, client_id: String, room_id: String) -> Result<()> {
         // Add to room members
         let mut rooms = self.rooms.write().await;
-        let room = rooms.get_mut(&room_id)
+        let room = rooms
+            .get_mut(&room_id)
             .ok_or(RustySocksError::RoomNotFound)?;
         room.add_member(client_id.clone())?;
         drop(rooms);
@@ -261,7 +262,8 @@ impl RoomManager {
     pub async fn leave_room(&self, client_id: &str, room_id: &str) -> Result<()> {
         // Remove from room members
         let mut rooms = self.rooms.write().await;
-        let room = rooms.get_mut(room_id)
+        let room = rooms
+            .get_mut(room_id)
             .ok_or(RustySocksError::RoomNotFound)?;
         room.remove_member(client_id);
         drop(rooms);
@@ -280,7 +282,10 @@ impl RoomManager {
 
     /// Removes a client from all rooms (e.g., on disconnect)
     pub async fn remove_client(&self, client_id: &str) -> Result<()> {
-        let client_rooms = self.client_rooms.write().await
+        let client_rooms = self
+            .client_rooms
+            .write()
+            .await
             .get(client_id)
             .cloned()
             .unwrap_or_default();
@@ -295,14 +300,15 @@ impl RoomManager {
     /// Gets all members of a room
     pub async fn get_room_members(&self, room_id: &str) -> Result<Vec<String>> {
         let rooms = self.rooms.read().await;
-        let room = rooms.get(room_id)
-            .ok_or(RustySocksError::RoomNotFound)?;
+        let room = rooms.get(room_id).ok_or(RustySocksError::RoomNotFound)?;
         Ok(room.members.iter().cloned().collect())
     }
 
     /// Gets all rooms a client is in
     pub async fn get_client_rooms(&self, client_id: &str) -> Vec<String> {
-        self.client_rooms.read().await
+        self.client_rooms
+            .read()
+            .await
             .get(client_id)
             .map(|rooms| rooms.iter().cloned().collect())
             .unwrap_or_default()
@@ -310,7 +316,9 @@ impl RoomManager {
 
     /// Lists all available rooms
     pub async fn list_rooms(&self) -> Vec<(String, String, usize)> {
-        self.rooms.read().await
+        self.rooms
+            .read()
+            .await
             .values()
             .map(|room| (room.id.clone(), room.name.clone(), room.member_count()))
             .collect()
@@ -323,7 +331,8 @@ impl RoomManager {
 
     /// Automatically joins a client to the default room
     pub async fn join_default_room(&self, client_id: String) -> Result<()> {
-        self.join_room(client_id, self.default_room_id.clone()).await
+        self.join_room(client_id, self.default_room_id.clone())
+            .await
     }
 }
 

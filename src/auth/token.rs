@@ -58,7 +58,7 @@ impl Claims {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs() as usize;
-        
+
         now > self.exp
     }
 }
@@ -101,11 +101,11 @@ impl TokenManager {
     /// Validates a token and returns the user ID if valid
     pub fn validate_and_get_user_id(&self, token: &str) -> Result<String> {
         let claims = self.get_claims(token)?;
-        
+
         if claims.is_expired() {
             return Err(RustySocksError::AuthError("Token expired".to_string()));
         }
-        
+
         Ok(claims.sub)
     }
 }
