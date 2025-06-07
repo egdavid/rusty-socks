@@ -30,7 +30,13 @@ async fn main() {
     );
 
     // Create session manager
-    let sessions = create_session_manager();
+    let sessions = match create_session_manager() {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            error!("Failed to create session manager: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // Create thread pool
     let thread_pool = match create_thread_pool(&config) {
@@ -51,7 +57,7 @@ async fn main() {
         .and(warp::ws())
         .and(with_sessions(sessions.clone()))
         .and(with_thread_pool(thread_pool.clone()))
-        .map(|ws: warp::ws::Ws, sessions, thread_pool| {
+        .map(|ws: warp::ws::Ws, sessions: Sessions, thread_pool: SharedThreadPool| {
             info!("New websocket connection");
             ws.on_upgrade(move |socket| {
                 // Use the thread pool to handle the WebSocket client
@@ -101,14 +107,9 @@ async fn main() {
 
 // Helper function to include sessions state in request
 fn with_sessions(
-    sessions: Result<Sessions, rusty_socks::error::RustySocksError>,
+    sessions: Sessions,
 ) -> impl Filter<Extract = (Sessions,), Error = Infallible> + Clone {
-    warp::any().map(move || {
-        sessions.clone().unwrap_or_else(|e| {
-            error!("Failed to initialize sessions: {}", e);
-            panic!("Cannot proceed without sessions")
-        })
-    })
+    warp::any().map(move || sessions.clone())
 }
 
 // Helper function to include thread pool in request

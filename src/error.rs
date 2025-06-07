@@ -19,6 +19,16 @@ pub enum RustySocksError {
     MessageParseError(String),
     MessageTooLarge(usize),
 
+    // Room errors
+    RoomNotFound,
+    RoomFull,
+    CannotDeleteDefaultRoom,
+
+    // Auth errors
+    AuthError(String),
+    Unauthorized,
+    Forbidden,
+
     // System errors
     SystemError(String),
 }
@@ -33,6 +43,12 @@ impl fmt::Display for RustySocksError {
             Self::StorageError(msg) => write!(f, "Storage error: {}", msg),
             Self::MessageParseError(msg) => write!(f, "Message parse error: {}", msg),
             Self::MessageTooLarge(size) => write!(f, "Message too large: {} bytes", size),
+            Self::RoomNotFound => write!(f, "Room not found"),
+            Self::RoomFull => write!(f, "Room is full"),
+            Self::CannotDeleteDefaultRoom => write!(f, "Cannot delete the default room"),
+            Self::AuthError(msg) => write!(f, "Authentication error: {}", msg),
+            Self::Unauthorized => write!(f, "Unauthorized access"),
+            Self::Forbidden => write!(f, "Forbidden: insufficient permissions"),
             Self::SystemError(msg) => write!(f, "System error: {}", msg),
         }
     }
