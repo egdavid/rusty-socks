@@ -9,6 +9,7 @@ pub mod constants;
 pub mod core;
 pub mod error;
 pub mod handlers;
+pub mod security_logger;
 pub mod storage;
 
 // Re-export main components

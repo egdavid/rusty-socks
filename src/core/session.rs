@@ -1,6 +1,5 @@
-use log::{debug, error, info};
+use log::{debug, error};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use warp::ws::Message as WsMessage;
 
@@ -72,6 +71,31 @@ impl SessionManager {
         Ok(())
     }
 
+    // Register an authenticated client connection
+    pub fn register_authenticated(
+        &mut self,
+        user: crate::auth::user::User,
+        sender: mpsc::UnboundedSender<WsMessage>,
+    ) -> Result<()> {
+        let connection = Connection::authenticated(user.clone(), sender);
+        self.connections.insert(user.id.clone(), connection);
+        debug!(
+            "Authenticated client registered: {} ({})",
+            user.id, user.username
+        );
+        Ok(())
+    }
+
+    // Get connection by ID
+    pub fn get_connection(&self, id: &str) -> Option<&Connection> {
+        self.connections.get(id)
+    }
+
+    // Get mutable connection by ID
+    pub fn get_connection_mut(&mut self, id: &str) -> Option<&mut Connection> {
+        self.connections.get_mut(id)
+    }
+
     // Remove a client connection
     pub fn unregister(&mut self, id: &str) -> Result<bool> {
         let was_present = self.connections.remove(id).is_some();
@@ -79,6 +103,17 @@ impl SessionManager {
             debug!("Client unregistered: {}", id);
         }
         Ok(was_present)
+    }
+    
+    // Get user information (username) for display purposes
+    pub fn get_user_info(&self, user_id: &str) -> Option<String> {
+        // Return a placeholder since we don't store user data in sessions
+        // TODO: Integrate with proper user storage/authentication system
+        if self.connections.contains_key(user_id) {
+            Some(format!("User_{}", &user_id[..8])) // Show first 8 chars of ID
+        } else {
+            None
+        }
     }
 
     // Broadcast a message to all connected clients
@@ -121,24 +156,5 @@ impl SessionManager {
     }
 }
 
-// Thread-safe session manager wrapper
-pub type Sessions = Arc<Mutex<SessionManager>>;
-
-pub fn create_session_manager() -> Result<Sessions> {
-    let message_store = storage::message_store::create_message_store().map_err(|e| {
-        RustySocksError::StorageError(format!("Failed to create message store: {}", e))
-    })?;
-
-    let session_manager = SessionManager::with_message_store(message_store);
-    info!("Session manager created successfully");
-
-    Ok(Arc::new(Mutex::new(session_manager)))
-}
-
-// Helper function to safely get a session lock with error handling
-pub fn lock_sessions(sessions: &Sessions) -> Result<std::sync::MutexGuard<SessionManager>> {
-    match sessions.lock() {
-        Ok(guard) => Ok(guard),
-        Err(e) => Err(RustySocksError::SessionLock(format!("{}", e))),
-    }
-}
+// NOTE: SessionManager is now integrated into ServerManager with async RwLock
+// The standalone Sessions type is deprecated in favor of unified architecture

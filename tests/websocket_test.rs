@@ -1,7 +1,6 @@
 // Integration test for Rusty Socks WebSocket server
 // This test validates the basic connection and message exchange functionality
 
-use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::process::{Child, Command};
@@ -9,7 +8,6 @@ use std::thread;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use uuid::Uuid;
 
 // Server process handle for proper cleanup
 struct ServerHandle {
@@ -58,6 +56,7 @@ fn start_server(port: u16) -> Result<ServerHandle, String> {
         .args(["run", "--bin", "rusty_socks"])
         .env("RUSTY_SOCKS_HOST", "127.0.0.1")
         .env("RUSTY_SOCKS_PORT", port.to_string())
+        .env("RUSTY_SOCKS_JWT_SECRET", "test-secret-key")
         .env("RUST_LOG", "debug")
         .spawn()
         .map_err(|e| format!("Failed to start Rusty Socks server: {}", e))?;
@@ -165,14 +164,12 @@ fn test_websocket_connection_and_messaging() {
             msg_json.get("type").is_some(),
             "Missing 'type' field in welcome message"
         );
-        assert_eq!(msg_json["type"], "Connect", "Expected Connect message type");
+        assert_eq!(msg_json["type"], "connected", "Expected connected message type");
 
         // Create a test message that matches expected server structure
+        // Let's request the list of rooms as a simple test
         let test_message = json!({
-            "id": Uuid::new_v4(),
-            "sender": "test_client",
-            "content": "Hello, Rusty Socks!",
-            "timestamp": Utc::now()
+            "type": "list_rooms"
         });
 
         // Send the test message

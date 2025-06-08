@@ -1,15 +1,24 @@
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
+use serde_json;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use warp::ws::{Message, WebSocket};
 
-use crate::core::message::{Message as ChatMessage, SocketMessage};
-use crate::core::session::{lock_sessions, Sessions};
+use crate::auth::token::TokenManager;
+use crate::core::message::SocketMessage;
+use crate::core::{MessageHandler, SharedServerManager};
+use crate::handlers::auth::authenticate_connection;
 
 // Handle a WebSocket connection
-pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
+pub async fn handle_ws_client(
+    ws: WebSocket,
+    server_manager: SharedServerManager,
+    token: Option<String>,
+    token_manager: Arc<TokenManager>,
+) {
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -24,70 +33,117 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
         }
     });
 
-    // Generate a unique client ID
-    let client_id = Uuid::new_v4().to_string();
-
-    // Register the client
-    {
-        let mut sessions_guard = match lock_sessions(&sessions) {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("Failed to acquire sessions lock for registration: {}", e);
-                return;
+    // Authenticate the connection
+    let user = match authenticate_connection(token, &token_manager).await {
+        Ok(user_opt) => {
+            if let Some(u) = user_opt {
+                info!("Authenticated user: {}", u.username);
+                Some(u)
+            } else {
+                info!("Anonymous connection");
+                None
             }
+        }
+        Err(e) => {
+            // Log authentication failure with limited detail for security
+            info!("Authentication failed for connection: invalid token");
+            debug!("Authentication error details: {}", e);
+            
+            // Send generic error message to client (no detailed error info)
+            let error_msg = serde_json::json!({
+                "type": "error",
+                "message": "Authentication failed"
+            });
+            if let Err(send_err) = tx.send(Message::text(error_msg.to_string())) {
+                debug!("Failed to send authentication error to client: {}", send_err);
+            }
+            return;
+        }
+    };
+
+    // Generate client ID (use user ID if authenticated, otherwise generate new one)
+    let client_id = user
+        .as_ref()
+        .map(|u| u.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // Register the client with integrated server manager
+    {
+        let result = if let Some(user) = user.clone() {
+            server_manager
+                .register_authenticated_user(user, tx.clone())
+                .await
+        } else {
+            server_manager
+                .register_anonymous_user(client_id.clone(), tx.clone())
+                .await
         };
 
-        if let Err(e) = sessions_guard.register(client_id.clone(), tx.clone()) {
-            error!("Failed to register client {}: {}", client_id, e);
+        if let Err(e) = result {
+            info!("Failed to register client: connection rejected");
+            debug!("Client registration error for {}: {}", client_id, e);
             return;
         }
 
         info!("Client connected: {}", client_id);
-        info!("Current connections: {}", sessions_guard.client_count());
+        info!(
+            "Current connections: {}",
+            server_manager.connection_count().await
+        );
     }
 
     // Send a welcome message to the client
-    let connect_msg = SocketMessage::Connect {
-        client_id: client_id.clone(),
+    let welcome_data = if let Some(user) = &user {
+        serde_json::json!({
+            "type": "connected",
+            "client_id": client_id.clone(),
+            "authenticated": true,
+            "username": user.username,
+            "global_role": user.global_role
+        })
+    } else {
+        serde_json::json!({
+            "type": "connected",
+            "client_id": client_id.clone(),
+            "authenticated": false
+        })
     };
 
-    match serde_json::to_string(&connect_msg) {
+    match serde_json::to_string(&welcome_data) {
         Ok(msg_str) => {
             if let Err(e) = tx.send(Message::text(msg_str)) {
-                error!("Failed to send welcome message: {}", e);
+                debug!("Failed to send welcome message: {}", e);
             }
         }
         Err(e) => {
-            error!("Failed to serialize connect message: {}", e);
-        }
-    };
-
-    // Retrieve recent messages from the session store
-    let recent_messages = match lock_sessions(&sessions) {
-        Ok(sessions_guard) => sessions_guard.get_recent_messages(10).unwrap_or_else(|e| {
-            error!("Failed to get recent messages: {}", e);
-            Vec::new()
-        }),
-        Err(e) => {
-            error!("Failed to acquire sessions lock for recent messages: {}", e);
-            Vec::new()
+            debug!("Failed to serialize connect message: {}", e);
         }
     };
 
     // Send recent messages to the newly connected client
-    for msg in recent_messages {
-        let socket_msg = SocketMessage::Chat(msg);
-        match serde_json::to_string(&socket_msg) {
-            Ok(msg_str) => {
-                if let Err(e) = tx.send(Message::text(msg_str)) {
-                    error!("Failed to send recent message: {}", e);
+    match server_manager.get_recent_messages(10).await {
+        Ok(recent_messages) => {
+            for msg in recent_messages {
+                let socket_msg = SocketMessage::Chat(msg);
+                match serde_json::to_string(&socket_msg) {
+                    Ok(msg_str) => {
+                        if let Err(e) = tx.send(Message::text(msg_str)) {
+                            debug!("Failed to send recent message: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to serialize recent message: {}", e);
+                    }
                 }
             }
-            Err(e) => {
-                error!("Failed to serialize recent message: {}", e);
-            }
+        }
+        Err(e) => {
+            debug!("Failed to get recent messages: {}", e);
         }
     }
+
+    // Create message handler for this connection
+    let message_handler = MessageHandler::new(server_manager.clone());
 
     // Handle incoming messages
     while let Some(result) = ws_rx.next().await {
@@ -95,99 +151,33 @@ pub async fn handle_ws_client(ws: WebSocket, sessions: Sessions) {
             Ok(msg) => {
                 // Only process text messages
                 if msg.is_text() {
-                    process_message(msg, &client_id, &sessions).await;
+                    if let Ok(text) = msg.to_str() {
+                        if let Err(e) = message_handler
+                            .handle_client_message(&client_id, text)
+                            .await
+                        {
+                            debug!("Message handling error from {}: {}", client_id, e);
+                        }
+                    }
                 }
             }
             Err(e) => {
-                error!("WebSocket error: {}", e);
+                debug!("WebSocket connection error: {}", e);
                 break;
             }
         }
     }
 
-    // Client disconnected
-    {
-        match lock_sessions(&sessions) {
-            Ok(mut sessions_guard) => {
-                if let Err(e) = sessions_guard.unregister(&client_id) {
-                    error!("Error unregistering client {}: {}", client_id, e);
-                } else {
-                    info!("Client disconnected: {}", client_id);
-                    info!("Current connections: {}", sessions_guard.client_count());
-                }
-            }
-            Err(e) => {
-                error!("Failed to acquire sessions lock for unregistration: {}", e);
-            }
-        }
-    }
-
-    // Broadcast disconnect message
-    let disconnect_msg = SocketMessage::Disconnect {
-        client_id: client_id.clone(),
-    };
-
-    match lock_sessions(&sessions) {
-        Ok(sessions_guard) => {
-            let broadcast_count = sessions_guard.broadcast(&disconnect_msg, &client_id);
-            debug!(
-                "Broadcast disconnect message to {} clients",
-                broadcast_count
-            );
-        }
-        Err(e) => {
-            error!(
-                "Failed to acquire sessions lock for disconnect broadcast: {}",
-                e
-            );
-        }
-    }
-}
-
-// Process an incoming WebSocket message
-async fn process_message(msg: Message, client_id: &str, sessions: &Sessions) {
-    // Extract the message content
-    let msg_str = match msg.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Failed to extract text from message: {:?}", e);
-            return;
-        }
-    };
-
-    // Try to parse as a chat message
-    match serde_json::from_str::<ChatMessage>(msg_str) {
-        Ok(chat_msg) => {
-            // Store the message
-            match lock_sessions(sessions) {
-                Ok(sessions_guard) => {
-                    match sessions_guard.store_message(chat_msg.clone()) {
-                        Ok(_) => {
-                            // Create a SocketMessage for broadcasting
-                            let socket_msg = SocketMessage::Chat(chat_msg);
-
-                            // Broadcast the message
-                            let broadcast_count = sessions_guard.broadcast(&socket_msg, client_id);
-                            info!(
-                                "Broadcast message to {} clients from {}",
-                                broadcast_count, client_id
-                            );
-                        }
-                        Err(e) => {
-                            error!("Failed to store message: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to acquire sessions lock for message processing: {}",
-                        e
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            warn!("Failed to parse message: {}", e);
-        }
+    // Cleanup on disconnect
+    if let Err(e) = server_manager.unregister_user(&client_id).await {
+        info!("Failed to cleanup client: connection cleanup error");
+        debug!("Cleanup error for client {}: {}", client_id, e);
+    } else {
+        info!("Client disconnected successfully");
+        debug!("Client {} disconnected", client_id);
+        info!(
+            "Current connections: {}",
+            server_manager.connection_count().await
+        );
     }
 }

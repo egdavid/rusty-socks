@@ -28,9 +28,16 @@ pub enum RustySocksError {
     AuthError(String),
     Unauthorized,
     Forbidden,
+    PermissionDenied(String),
+
+    // Validation errors
+    ValidationError(String),
 
     // System errors
     SystemError(String),
+    
+    // Configuration errors
+    ConfigError(String),
 }
 
 impl fmt::Display for RustySocksError {
@@ -49,7 +56,10 @@ impl fmt::Display for RustySocksError {
             Self::AuthError(msg) => write!(f, "Authentication error: {}", msg),
             Self::Unauthorized => write!(f, "Unauthorized access"),
             Self::Forbidden => write!(f, "Forbidden: insufficient permissions"),
+            Self::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
+            Self::ValidationError(msg) => write!(f, "Validation error: {}", msg),
             Self::SystemError(msg) => write!(f, "System error: {}", msg),
+            Self::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
         }
     }
 }

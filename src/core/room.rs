@@ -334,8 +334,117 @@ impl RoomManager {
         self.join_room(client_id, self.default_room_id.clone())
             .await
     }
+    
+    /// Check if user is in a specific room
+    pub async fn is_user_in_room(&self, user_id: &str, room_id: &str) -> Result<bool> {
+        let rooms = self.rooms.read().await;
+        match rooms.get(room_id) {
+            Some(room) => Ok(room.members.contains(user_id)),
+            None => Err(RustySocksError::RoomNotFound),
+        }
+    }
+    
+    /// Check if user is banned from a room
+    pub async fn is_user_banned(&self, user_id: &str, room_id: &str) -> Result<bool> {
+        let rooms = self.rooms.read().await;
+        match rooms.get(room_id) {
+            Some(room) => {
+                if let Some(ban_expiry) = room.banned_users.get(user_id) {
+                    // Check if ban is permanent (None) or still active
+                    Ok(ban_expiry.is_none() || ban_expiry.unwrap() > chrono::Utc::now())
+                } else {
+                    Ok(false)
+                }
+            }
+            None => Err(RustySocksError::RoomNotFound),
+        }
+    }
+    
+    /// Check if user is muted in a room
+    pub async fn is_user_muted(&self, user_id: &str, room_id: &str) -> Result<bool> {
+        let rooms = self.rooms.read().await;
+        match rooms.get(room_id) {
+            Some(room) => {
+                if let Some(mute_expiry) = room.muted_users.get(user_id) {
+                    // Check if mute is permanent (None) or still active
+                    Ok(mute_expiry.is_none() || mute_expiry.unwrap() > chrono::Utc::now())
+                } else {
+                    Ok(false)
+                }
+            }
+            None => Err(RustySocksError::RoomNotFound),
+        }
+    }
+    
+    /// Get user role in a specific room
+    pub async fn get_user_role(&self, user_id: &str, room_id: &str) -> Result<Option<UserRole>> {
+        let rooms = self.rooms.read().await;
+        match rooms.get(room_id) {
+            Some(room) => Ok(room.user_roles.get(user_id).cloned()),
+            None => Err(RustySocksError::RoomNotFound),
+        }
+    }
+    
+    /// Ban user from room
+    pub async fn ban_user(&self, room_id: &str, user_id: &str, duration_hours: Option<u64>) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms.get_mut(room_id).ok_or(RustySocksError::RoomNotFound)?;
+        
+        // Calculate ban expiry
+        let ban_expiry = duration_hours.map(|hours| {
+            chrono::Utc::now() + chrono::Duration::hours(hours as i64)
+        });
+        
+        // Add to banned users
+        room.banned_users.insert(user_id.to_string(), ban_expiry);
+        
+        // Remove from room if currently a member
+        room.members.remove(user_id);
+        room.user_roles.remove(user_id);
+        
+        // Remove from client_rooms tracking
+        let mut client_rooms = self.client_rooms.write().await;
+        if let Some(user_rooms) = client_rooms.get_mut(user_id) {
+            user_rooms.remove(room_id);
+        }
+        
+        Ok(())
+    }
+    
+    /// Kick user from room (temporary removal without ban)
+    pub async fn kick_user(&self, room_id: &str, user_id: &str) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms.get_mut(room_id).ok_or(RustySocksError::RoomNotFound)?;
+        
+        // Remove from room (but keep role for potential rejoin)
+        room.members.remove(user_id);
+        
+        // Remove from client_rooms tracking
+        let mut client_rooms = self.client_rooms.write().await;
+        if let Some(user_rooms) = client_rooms.get_mut(user_id) {
+            user_rooms.remove(room_id);
+        }
+        
+        Ok(())
+    }
+    
+    /// Set user role in room  
+    pub async fn set_user_role(&self, room_id: &str, user_id: &str, role: UserRole) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms.get_mut(room_id).ok_or(RustySocksError::RoomNotFound)?;
+        
+        // Check if user is in room
+        if !room.members.contains(user_id) {
+            return Err(RustySocksError::SessionNotFound("User not in room".to_string()));
+        }
+        
+        // Set the role
+        room.user_roles.insert(user_id.to_string(), role);
+        
+        Ok(())
+    }
 }
 
 // TODO: Add room persistence to survive server restarts
 // TODO: Add room metadata (description, tags, etc.)
-// TODO: Add room permissions and moderators
+// NOTE: Room permissions and moderators system implemented with role-based access control
