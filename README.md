@@ -1,8 +1,8 @@
-# Rusty Socks 🧦⚡
+# Rusty Socks
 
 A high-performance, production-ready WebSocket server written in Rust, designed for real-time applications across gaming, finance, chat, and other domains requiring fast, secure communication.
 
-## 🚀 Features
+## Features
 
 ### Core Capabilities
 - **High-Performance WebSocket Server** - Built with Tokio and Warp for maximum throughput

@@ -5,7 +5,7 @@
 We take security seriously. If you discover a security vulnerability, please report it responsibly:
 
 1. **DO NOT** open a public issue
-2. Email: security@rustysocks.dev (or create one for your project)
+2. Email: security@rustysocks.io
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
@@ -152,4 +152,4 @@ The security implementation helps meet requirements for:
 
 ---
 
-*Last updated: January 2025*
+*Last updated: June 2025*
