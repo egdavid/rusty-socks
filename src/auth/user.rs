@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// User roles within a room
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,6 +23,7 @@ impl UserRole {
                 Permission::SendMessages,
                 Permission::DeleteMessages,
                 Permission::InviteUsers,
+                Permission::CreateRooms,
             ],
             UserRole::Admin => vec![
                 Permission::ManageRoles,
@@ -33,6 +33,7 @@ impl UserRole {
                 Permission::SendMessages,
                 Permission::DeleteMessages,
                 Permission::InviteUsers,
+                Permission::CreateRooms,
             ],
             UserRole::Moderator => vec![
                 Permission::KickUsers,
@@ -40,13 +41,8 @@ impl UserRole {
                 Permission::SendMessages,
                 Permission::DeleteMessages,
             ],
-            UserRole::Member => vec![
-                Permission::SendMessages,
-                Permission::InviteUsers,
-            ],
-            UserRole::Guest => vec![
-                Permission::SendMessages,
-            ],
+            UserRole::Member => vec![Permission::SendMessages, Permission::InviteUsers],
+            UserRole::Guest => vec![Permission::SendMessages],
         }
     }
 
@@ -59,14 +55,15 @@ impl UserRole {
 /// Permissions that can be granted to users
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Permission {
-    ManageRoom,      // Create, delete, configure rooms
-    ManageRoles,     // Assign/remove roles
-    KickUsers,       // Remove users from room
-    BanUsers,        // Ban users from room
-    MuteUsers,       // Mute users in room
-    SendMessages,    // Send messages to room
-    DeleteMessages,  // Delete any message
-    InviteUsers,     // Invite users to room
+    ManageRoom,     // Create, delete, configure rooms
+    ManageRoles,    // Assign/remove roles
+    KickUsers,      // Remove users from room
+    BanUsers,       // Ban users from room
+    MuteUsers,      // Mute users in room
+    SendMessages,   // Send messages to room
+    DeleteMessages, // Delete any message
+    InviteUsers,    // Invite users to room
+    CreateRooms,    // Create new rooms
 }
 
 /// Represents an authenticated user
@@ -80,8 +77,6 @@ pub struct User {
     pub email: Option<String>,
     /// Avatar URL (optional)
     pub avatar_url: Option<String>,
-    /// User's roles per room (room_id -> role)
-    pub room_roles: HashMap<String, UserRole>,
     /// Global role (for server-wide permissions)
     pub global_role: Option<UserRole>,
     /// Account creation timestamp
@@ -99,7 +94,6 @@ impl User {
             username,
             email: None,
             avatar_url: None,
-            room_roles: HashMap::new(),
             global_role: None,
             created_at: now,
             last_seen: now,
@@ -113,36 +107,13 @@ impl User {
         user
     }
 
-    /// Get user's role in a specific room
-    pub fn get_room_role(&self, room_id: &str) -> Option<UserRole> {
-        self.room_roles.get(room_id).copied()
-    }
-
-    /// Set user's role in a specific room
-    pub fn set_room_role(&mut self, room_id: String, role: UserRole) {
-        self.room_roles.insert(room_id, role);
-    }
-
-    /// Remove user's role from a room
-    pub fn remove_room_role(&mut self, room_id: &str) {
-        self.room_roles.remove(room_id);
-    }
-
-    /// Check if user has permission in a specific room
-    pub fn has_permission_in_room(&self, room_id: &str, permission: Permission) -> bool {
-        // Check global role first
+    /// Check if user has global permission (room-specific permissions are managed by RoomManager)
+    pub fn has_global_permission(&self, permission: Permission) -> bool {
         if let Some(global_role) = self.global_role {
-            if global_role.has_permission(permission) {
-                return true;
-            }
+            global_role.has_permission(permission)
+        } else {
+            false
         }
-
-        // Then check room-specific role
-        if let Some(room_role) = self.get_room_role(room_id) {
-            return room_role.has_permission(permission);
-        }
-
-        false
     }
 
     /// Update last seen timestamp

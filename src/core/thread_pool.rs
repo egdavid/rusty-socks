@@ -5,13 +5,14 @@
 
 use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::runtime::{Builder, Runtime};
 use tokio::task::JoinHandle;
 
 use crate::config::ServerConfig;
 use crate::error::{Result, RustySocksError};
 
-/// Represents a thread pool for executing WebSocket related tasks
+/// Represents a thread pool for executing WebSocket related tasks with DoS protection
 pub struct ThreadPool {
     /// Runtime instance managing the thread pool
     runtime: Arc<Runtime>,
@@ -21,10 +22,14 @@ pub struct ThreadPool {
     max_queued_tasks: usize,
     /// Current number of active tasks
     active_tasks: Arc<Mutex<usize>>,
+    /// Rate limiter for task submissions (per-second)
+    task_rate_limiter: Arc<Mutex<Vec<Instant>>>,
+    /// Maximum tasks per second to prevent DoS
+    max_tasks_per_second: usize,
 }
 
 impl ThreadPool {
-    /// Create a new thread pool with the specified number of worker threads
+    /// Create a new thread pool with the specified number of worker threads and DoS protection
     ///
     /// # Arguments
     /// * `worker_count` - Number of worker threads to create
@@ -35,6 +40,9 @@ impl ThreadPool {
     pub fn new(worker_count: usize, max_queued_tasks: usize) -> Result<Self> {
         // Set a minimum number of threads to avoid performance issues
         let actual_workers = worker_count.max(2);
+        
+        // Calculate reasonable task rate limit based on thread count
+        let max_tasks_per_second = (actual_workers * 100).min(1000); // Max 1000 tasks/sec
 
         let runtime = match Builder::new_multi_thread()
             .worker_threads(actual_workers)
@@ -62,6 +70,8 @@ impl ThreadPool {
             worker_count: actual_workers,
             max_queued_tasks,
             active_tasks: Arc::new(Mutex::new(0)),
+            task_rate_limiter: Arc::new(Mutex::new(Vec::new())),
+            max_tasks_per_second,
         })
     }
 
@@ -76,19 +86,25 @@ impl ThreadPool {
         Self::new(config.thread_pool_size, config.max_queued_tasks)
     }
 
-    /// Execute a future on the thread pool
+    /// Execute a future on the thread pool with DoS protection
     ///
     /// # Arguments
     /// * `future` - Task to be executed
     ///
     /// # Returns
     /// An `Option<JoinHandle<T>>` that can be used to await the task's result,
-    /// or `None` if the thread pool is at capacity
+    /// or `None` if the thread pool is at capacity or rate limited
     pub fn execute<F>(&self, future: F) -> Option<JoinHandle<F::Output>>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        // Check rate limiting first
+        if !self.check_task_rate_limit() {
+            warn!("Task submission rate limit exceeded, rejecting task");
+            return None;
+        }
+
         // Check if we can accept more tasks
         let mut active_count = match self.active_tasks.lock() {
             Ok(guard) => guard,
@@ -123,6 +139,30 @@ impl ThreadPool {
         });
 
         Some(handle)
+    }
+    
+    /// Check if task submission rate is within limits
+    fn check_task_rate_limit(&self) -> bool {
+        let now = Instant::now();
+        let mut rate_limiter = match self.task_rate_limiter.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                error!("Rate limiter mutex poisoned: {}", e);
+                return false;
+            }
+        };
+        
+        // Remove entries older than 1 second
+        rate_limiter.retain(|&time| now.duration_since(time) < Duration::from_secs(1));
+        
+        // Check if we're under the rate limit
+        if rate_limiter.len() >= self.max_tasks_per_second {
+            return false;
+        }
+        
+        // Add current timestamp
+        rate_limiter.push(now);
+        true
     }
 
     /// Get the current number of active tasks

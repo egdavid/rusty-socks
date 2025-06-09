@@ -1,21 +1,29 @@
-# Rusty Socks
+# Rusty Socks 🧦⚡
 
-A lightweight WebSocket server implemented in Rust!
+A high-performance, production-ready WebSocket server written in Rust, designed for real-time applications across gaming, finance, chat, and other domains requiring fast, secure communication.
 
-## Overview
+## 🚀 Features
 
-Rusty Socks is a 'high-performance' WebSocket server built with Rust, designed for real-time communication applications. It provides a viable foundation for building WebSocket-based services with features like:
+### Core Capabilities
+- **High-Performance WebSocket Server** - Built with Tokio and Warp for maximum throughput
+- **Room-Based Communication** - Organize users into channels/rooms with fine-grained permissions
+- **JWT Authentication** - Secure token-based authentication with role-based access control (RBAC)
+- **Rate Limiting** - Prevent abuse with configurable per-user and global rate limits
+- **Message Validation** - XSS protection, spam detection, and content filtering
+- **Thread-Safe Architecture** - Concurrent message handling with race condition protection
 
-- **Room & Channel Management**: Create and manage multiple chat rooms with member isolation
-- **Authentication & Authorization**: JWT-based authentication with role-based permissions
-- **User Roles & Permissions**: Owner, Admin, Moderator, Member, and Guest roles with granular permissions
-- **Moderation Tools**: Ban, mute, and kick users with optional expiration times
-- **Session Management**: Thread-safe connection and session handling
-- **Message Broadcasting**: Efficient message routing to room members
-- **In-memory Storage**: Fast message buffering with circular storage
-- **Thread Pool**: Configurable worker threads for optimal concurrent connection handling
-- **Health Monitoring**: Real-time server statistics and health endpoints
-- More to come...
+### Security Features
+- **Production-Ready Security** - Comprehensive vulnerability protection
+- **Role-Based Permissions** - Owner, Admin, Moderator, Member, and Guest roles
+- **Ban/Kick/Mute System** - Complete moderation toolkit
+- **Connection Limiting** - Prevent DoS attacks with IP-based connection limits
+- **Input Validation** - Protect against injection and malformed data
+
+### Scalability
+- **Configurable Thread Pool** - Optimize performance for your hardware
+- **Memory Protection** - Built-in safeguards against memory exhaustion
+- **Async Broadcasting** - Efficient message distribution to large user groups
+- **Resource Cleanup** - Automatic cleanup of idle connections and expired data
 
 ## Architecture
 
