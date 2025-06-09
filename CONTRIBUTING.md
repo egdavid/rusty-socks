@@ -178,4 +178,4 @@ All contributors will be acknowledged in:
 - Release notes
 - Documentation credits
 
-Thank you for helping make Rusty Socks better! 🦀🧦
+Thank you for helping make Rusty Socks better!
