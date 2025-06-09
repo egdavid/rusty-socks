@@ -5,8 +5,8 @@ use warp::ws::Message as WsMessage;
 
 use crate::core::connection::Connection;
 use crate::core::message::SocketMessage;
-use crate::error::{Result, RustySocksError};
-use crate::storage;
+use crate::error::Result;
+use crate::storage::{self, message_store};
 
 // Manages multiple client connections and their state
 pub struct SessionManager {
@@ -34,10 +34,22 @@ impl SessionManager {
 
     pub fn store_message(&self, message: crate::core::message::Message) -> Result<bool> {
         if let Some(store) = &self.message_store {
-            let mut store_guard = store.lock().map_err(|e| {
-                RustySocksError::StorageError(format!("Failed to lock message store: {}", e))
-            })?;
-            store_guard.add_message(message);
+            // Note: This is now a blocking operation in async context
+            // Consider using store_message_async instead for better performance
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                message_store::add_message_async(store, message).await;
+            });
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Async version of store_message for better performance
+    pub async fn store_message_async(&self, message: crate::core::message::Message) -> Result<bool> {
+        if let Some(store) = &self.message_store {
+            message_store::add_message_async(store, message).await;
             Ok(true)
         } else {
             Ok(false)
@@ -54,20 +66,32 @@ impl SessionManager {
 
     pub fn get_recent_messages(&self, limit: usize) -> Result<Vec<crate::core::message::Message>> {
         if let Some(store) = &self.message_store {
-            let store_guard = store.lock().map_err(|e| {
-                RustySocksError::StorageError(format!("Failed to lock message store: {}", e))
-            })?;
-            Ok(store_guard.recent_messages(limit))
+            // Note: This is now a blocking operation in async context
+            // Consider using get_recent_messages_async instead for better performance
+            let rt = tokio::runtime::Handle::current();
+            let messages = rt.block_on(async {
+                message_store::recent_messages_async(store, limit).await
+            });
+            Ok(messages)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Async version of get_recent_messages for better performance
+    pub async fn get_recent_messages_async(&self, limit: usize) -> Result<Vec<crate::core::message::Message>> {
+        if let Some(store) = &self.message_store {
+            Ok(message_store::recent_messages_async(store, limit).await)
         } else {
             Ok(Vec::new())
         }
     }
 
     // Register a new client connection
-    pub fn register(&mut self, id: String, sender: mpsc::UnboundedSender<WsMessage>) -> Result<()> {
-        let connection = Connection::with_id(id.clone(), sender);
+    pub fn register(&mut self, id: String, sender: mpsc::UnboundedSender<WsMessage>, client_ip: std::net::IpAddr) -> Result<()> {
+        let connection = Connection::with_id(id.clone(), sender, client_ip);
         self.connections.insert(id.clone(), connection);
-        debug!("Client registered: {}", id);
+        debug!("Client registered: {} from IP {}", id, client_ip);
         Ok(())
     }
 
@@ -76,12 +100,13 @@ impl SessionManager {
         &mut self,
         user: crate::auth::user::User,
         sender: mpsc::UnboundedSender<WsMessage>,
+        client_ip: std::net::IpAddr,
     ) -> Result<()> {
-        let connection = Connection::authenticated(user.clone(), sender);
+        let connection = Connection::authenticated(user.clone(), sender, client_ip);
         self.connections.insert(user.id.clone(), connection);
         debug!(
-            "Authenticated client registered: {} ({})",
-            user.id, user.username
+            "Authenticated client registered: {} ({}) from IP {}",
+            user.id, user.username, client_ip
         );
         Ok(())
     }

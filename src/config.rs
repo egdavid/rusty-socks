@@ -23,14 +23,29 @@ pub struct ServerConfig {
     pub max_queued_tasks: usize,
     /// JWT secret for token signing/validation
     pub jwt_secret: String,
+    /// CSRF secret for CSRF token generation/validation (separate from JWT for security)
+    pub csrf_secret: String,
     /// Maximum connections per IP address
     pub max_connections_per_ip: usize,
     /// Rate limit: messages per minute per user
     pub rate_limit_messages_per_minute: u32,
+    /// Allow anonymous connections (security consideration)
+    pub allow_anonymous_access: bool,
+    /// Development mode (enables localhost origins)
+    pub development_mode: bool,
+    /// TLS configuration
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
+    /// Enable TLS
+    pub enable_tls: bool,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        // SECURITY: Default implementation should not be used for production
+        // Always use ServerConfig::from_env() to ensure proper JWT secret configuration
+        log::warn!("Using default ServerConfig - this should only be used for testing!");
+        
         Self {
             host: DEFAULT_HOST.to_string(),
             port: DEFAULT_PORT,
@@ -40,38 +55,77 @@ impl Default for ServerConfig {
             ping_interval: Duration::from_secs(30), // 30 seconds ping interval
             thread_pool_size: DEFAULT_THREAD_POOL_SIZE, // Default worker threads count
             max_queued_tasks: DEFAULT_MAX_QUEUED_TASKS, // Default maximum queued tasks
-            jwt_secret: Self::generate_secure_secret(),
+            jwt_secret: "INSECURE-DEFAULT-FOR-TESTING-ONLY".to_string(), // SECURITY: Obvious insecure default
+            csrf_secret: "INSECURE-CSRF-DEFAULT-FOR-TESTING-ONLY".to_string(), // SECURITY: Obvious insecure default
             max_connections_per_ip: 10,     // Default 10 connections per IP
             rate_limit_messages_per_minute: 60, // Default 60 messages per minute
+            allow_anonymous_access: false,   // SECURITY: Default to requiring authentication
+            development_mode: false,         // SECURITY: Default to production mode
+            tls_cert_path: None,
+            tls_key_path: None,
+            enable_tls: false,
         }
     }
 }
 
 impl ServerConfig {
-    /// Generate a cryptographically secure random JWT secret
-    fn generate_secure_secret() -> String {
-        use rand::RngCore;
-        use base64::Engine;
-        
-        let mut bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
     
-    /// Validate JWT secret meets security requirements
-    fn validate_jwt_secret(secret: &str) -> Result<()> {
+    /// Validate that a secret meets security requirements
+    fn validate_secret(secret: &str, secret_type: &str) -> Result<()> {
         if secret.len() < 32 {
             return Err(RustySocksError::ConfigError(
-                "JWT secret must be at least 32 characters long".to_string()
+                format!("{} secret must be at least 32 characters long", secret_type)
             ));
         }
         
-        if secret.contains("your-secret-key") || secret.contains("change-this") {
+        // Check for insecure default or example values
+        let insecure_patterns = [
+            "your-secret-key",
+            "change-this", 
+            "INSECURE-DEFAULT-FOR-TESTING-ONLY",
+            "INSECURE-CSRF-DEFAULT-FOR-TESTING-ONLY",
+            "test-secret",
+            "default",
+            "secret",
+            "password",
+            "12345"
+        ];
+        
+        for pattern in &insecure_patterns {
+            if secret.contains(pattern) {
+                return Err(RustySocksError::ConfigError(
+                    format!("{} secret contains insecure pattern '{}'. Please use a secure random secret generated with: openssl rand -base64 32", secret_type, pattern)
+                ));
+            }
+        }
+        
+        // Ensure some complexity
+        if secret.chars().all(|c| c.is_ascii_alphabetic()) {
             return Err(RustySocksError::ConfigError(
-                "JWT secret appears to be a default/example value. Please use a secure random secret.".to_string()
+                format!("{} secret should contain mixed characters (letters, numbers, symbols) for security", secret_type)
             ));
         }
         
+        Ok(())
+    }
+
+    /// Validate JWT secret meets security requirements
+    fn validate_jwt_secret(secret: &str) -> Result<()> {
+        Self::validate_secret(secret, "JWT")
+    }
+
+    /// Validate CSRF secret meets security requirements
+    fn validate_csrf_secret(secret: &str) -> Result<()> {
+        Self::validate_secret(secret, "CSRF")
+    }
+
+    /// Ensure JWT and CSRF secrets are different for security
+    fn validate_secrets_are_different(jwt_secret: &str, csrf_secret: &str) -> Result<()> {
+        if jwt_secret == csrf_secret {
+            return Err(RustySocksError::ConfigError(
+                "JWT and CSRF secrets must be different for security. Using the same secret for both purposes increases attack surface.".to_string()
+            ));
+        }
         Ok(())
     }
 
@@ -114,12 +168,23 @@ impl ServerConfig {
             .unwrap_or(DEFAULT_MAX_QUEUED_TASKS);
 
         let jwt_secret = env::var("RUSTY_SOCKS_JWT_SECRET")
-            .unwrap_or_else(|_| {
-                eprintln!("WARNING: RUSTY_SOCKS_JWT_SECRET not set. Generating random secret.");
-                eprintln!("WARNING: This secret will change on each restart, invalidating existing tokens.");
-                eprintln!("WARNING: For production, set RUSTY_SOCKS_JWT_SECRET environment variable.");
-                Self::generate_secure_secret()
-            });
+            .or_else(|_| env::var("JWT_SECRET"))
+            .map_err(|_| {
+                RustySocksError::ConfigError(
+                    "JWT_SECRET environment variable is required for security. \
+                     Generate one with: openssl rand -base64 32".to_string()
+                )
+            })?;
+
+        let csrf_secret = env::var("RUSTY_SOCKS_CSRF_SECRET")
+            .or_else(|_| env::var("CSRF_SECRET"))
+            .map_err(|_| {
+                RustySocksError::ConfigError(
+                    "CSRF_SECRET environment variable is required for security. \
+                     Generate one with: openssl rand -base64 32 \
+                     NOTE: CSRF secret must be different from JWT secret.".to_string()
+                )
+            })?;
 
         let max_connections_per_ip = env::var("RUSTY_SOCKS_MAX_CONN_PER_IP")
             .ok()
@@ -131,8 +196,49 @@ impl ServerConfig {
             .and_then(|r| r.parse().ok())
             .unwrap_or(60);
 
-        // Validate the JWT secret
+        let allow_anonymous_access = env::var("RUSTY_SOCKS_ALLOW_ANONYMOUS")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false); // SECURITY: Default to false
+
+        let development_mode = env::var("RUSTY_SOCKS_DEVELOPMENT_MODE")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false); // SECURITY: Default to false (production mode)
+
+        // TLS configuration
+        let enable_tls = env::var("RUSTY_SOCKS_ENABLE_TLS")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+
+        let tls_cert_path = env::var("RUSTY_SOCKS_TLS_CERT_PATH").ok();
+        let tls_key_path = env::var("RUSTY_SOCKS_TLS_KEY_PATH").ok();
+
+        // Validate TLS configuration if enabled
+        if enable_tls {
+            if tls_cert_path.is_none() || tls_key_path.is_none() {
+                return Err(RustySocksError::ConfigError(
+                    "TLS is enabled but RUSTY_SOCKS_TLS_CERT_PATH or RUSTY_SOCKS_TLS_KEY_PATH is not set".to_string()
+                ));
+            }
+
+            // Validate that certificate and key files exist
+            if let (Some(ref cert_path), Some(ref key_path)) = (&tls_cert_path, &tls_key_path) {
+                if !std::path::Path::new(cert_path).exists() {
+                    return Err(RustySocksError::ConfigError(
+                        format!("TLS certificate file does not exist: {}", cert_path)
+                    ));
+                }
+                if !std::path::Path::new(key_path).exists() {
+                    return Err(RustySocksError::ConfigError(
+                        format!("TLS private key file does not exist: {}", key_path)
+                    ));
+                }
+            }
+        }
+
+        // Validate both secrets
         Self::validate_jwt_secret(&jwt_secret)?;
+        Self::validate_csrf_secret(&csrf_secret)?;
+        Self::validate_secrets_are_different(&jwt_secret, &csrf_secret)?;
 
         Ok(Self {
             host,
@@ -144,8 +250,14 @@ impl ServerConfig {
             thread_pool_size,
             max_queued_tasks,
             jwt_secret,
+            csrf_secret,
             max_connections_per_ip,
             rate_limit_messages_per_minute: rate_limit_messages,
+            allow_anonymous_access,
+            development_mode,
+            enable_tls,
+            tls_cert_path,
+            tls_key_path,
         })
     }
 }

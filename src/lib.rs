@@ -9,8 +9,10 @@ pub mod constants;
 pub mod core;
 pub mod error;
 pub mod handlers;
+pub mod security;
 pub mod security_logger;
 pub mod storage;
+pub mod tls;
 
 // Re-export main components
 pub use config::*;

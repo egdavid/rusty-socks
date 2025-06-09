@@ -26,6 +26,7 @@ pub enum RustySocksError {
 
     // Auth errors
     AuthError(String),
+    AuthenticationError(String),
     Unauthorized,
     Forbidden,
     PermissionDenied(String),
@@ -38,6 +39,12 @@ pub enum RustySocksError {
     
     // Configuration errors
     ConfigError(String),
+    
+    // Additional errors
+    NotImplemented(String),
+    RegistrationError(String),
+    NotFound(String),
+    ConflictError(String),
 }
 
 impl fmt::Display for RustySocksError {
@@ -54,12 +61,17 @@ impl fmt::Display for RustySocksError {
             Self::RoomFull => write!(f, "Room is full"),
             Self::CannotDeleteDefaultRoom => write!(f, "Cannot delete the default room"),
             Self::AuthError(msg) => write!(f, "Authentication error: {}", msg),
+            Self::AuthenticationError(msg) => write!(f, "Authentication error: {}", msg),
             Self::Unauthorized => write!(f, "Unauthorized access"),
             Self::Forbidden => write!(f, "Forbidden: insufficient permissions"),
             Self::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
             Self::ValidationError(msg) => write!(f, "Validation error: {}", msg),
             Self::SystemError(msg) => write!(f, "System error: {}", msg),
             Self::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
+            Self::NotImplemented(msg) => write!(f, "Not implemented: {}", msg),
+            Self::RegistrationError(msg) => write!(f, "Registration error: {}", msg),
+            Self::NotFound(msg) => write!(f, "Not found: {}", msg),
+            Self::ConflictError(msg) => write!(f, "Conflict error: {}", msg),
         }
     }
 }
@@ -70,6 +82,20 @@ impl Error for RustySocksError {}
 impl<T> From<PoisonError<T>> for RustySocksError {
     fn from(err: PoisonError<T>) -> Self {
         RustySocksError::SessionLock(format!("Mutex poisoned: {}", err))
+    }
+}
+
+// Converting from serde_json::Error
+impl From<serde_json::Error> for RustySocksError {
+    fn from(err: serde_json::Error) -> Self {
+        RustySocksError::MessageParseError(format!("JSON error: {}", err))
+    }
+}
+
+// Converting from std::io::Error
+impl From<std::io::Error> for RustySocksError {
+    fn from(err: std::io::Error) -> Self {
+        RustySocksError::SystemError(format!("IO error: {}", err))
     }
 }
 

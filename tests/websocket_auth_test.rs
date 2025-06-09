@@ -44,12 +44,21 @@ async fn test_authenticated_connection() {
         "test-user-id".to_string(),
         "testuser".to_string(),
         Some("test@example.com".to_string()),
-    );
+    ).unwrap();
     let token = token_manager.generate_token(&claims).unwrap();
 
-    // Connect with token
-    let url = format!("ws://127.0.0.1:3030/ws?token={}", token);
-    let (ws_stream, _) = connect_async(&url).await.expect("Failed to connect");
+    // Connect with token in header (secure method)
+    let url = "ws://127.0.0.1:3030/ws";
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    
+    let mut request = url.into_client_request().expect("Failed to create request");
+    request.headers_mut().insert(
+        "authorization", 
+        HeaderValue::from_str(&format!("Bearer {}", token)).expect("Invalid header value")
+    );
+    
+    let (ws_stream, _) = connect_async(request).await.expect("Failed to connect");
     let (mut _tx, mut rx) = ws_stream.split();
 
     // Receive welcome message
@@ -67,10 +76,18 @@ async fn test_authenticated_connection() {
 #[tokio::test]
 #[ignore = "Requires running server"]
 async fn test_invalid_token_rejection() {
-    // Connect with invalid token
-    let url = "ws://127.0.0.1:3030/ws?token=invalid.token.here";
-
-    let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
+    // Connect with invalid token in header (secure method)
+    let url = "ws://127.0.0.1:3030/ws";
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    
+    let mut request = url.into_client_request().expect("Failed to create request");
+    request.headers_mut().insert(
+        "authorization", 
+        HeaderValue::from_str("Bearer invalid.token.here").expect("Invalid header value")
+    );
+    
+    let (ws_stream, _) = connect_async(request).await.expect("Failed to connect");
     let (mut _tx, mut rx) = ws_stream.split();
 
     // Should receive error message
@@ -91,14 +108,23 @@ async fn test_invalid_token_rejection() {
 async fn test_expired_token_rejection() {
     // Create expired token
     let token_manager = TokenManager::new("test-secret-key");
-    let mut claims = Claims::new("test-user-id".to_string(), "testuser".to_string(), None);
+    let mut claims = Claims::new("test-user-id".to_string(), "testuser".to_string(), None).unwrap();
     claims.exp = claims.iat - 3600; // Expired 1 hour ago
 
     let token = token_manager.generate_token(&claims).unwrap();
 
-    // Try to connect with expired token
-    let url = format!("ws://127.0.0.1:3030/ws?token={}", token);
-    let (ws_stream, _) = connect_async(&url).await.expect("Failed to connect");
+    // Try to connect with expired token in header (secure method)
+    let url = "ws://127.0.0.1:3030/ws";
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    
+    let mut request = url.into_client_request().expect("Failed to create request");
+    request.headers_mut().insert(
+        "authorization", 
+        HeaderValue::from_str(&format!("Bearer {}", token)).expect("Invalid header value")
+    );
+    
+    let (ws_stream, _) = connect_async(request).await.expect("Failed to connect");
     let (mut _tx, mut rx) = ws_stream.split();
 
     // Should receive error message

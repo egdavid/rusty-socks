@@ -1,14 +1,26 @@
 use log::{error, info, warn};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use warp::{self, Filter};
 
 use rusty_socks::auth::token::TokenManager;
+use rusty_socks::storage::token_revocation::create_memory_revocation_store;
 use rusty_socks::config::ServerConfig;
 use rusty_socks::constants::WS_PATH;
 use rusty_socks::core::thread_pool::create_thread_pool;
-use rusty_socks::core::{ServerManager, SharedServerManager, SharedThreadPool};
+use rusty_socks::core::{extract_client_ip, IpExtractionConfig, ServerManager, SharedServerManager, SharedThreadPool};
 use rusty_socks::handlers::websocket::handle_ws_client;
+use rusty_socks::security::{CSRFProtection, CSRFValidationResult, init_production_warnings};
+use rusty_socks::security::headers::{with_security_headers, with_api_security_headers};
+use rusty_socks::security_logger::init_security_logger;
+use rusty_socks::tls::TlsConfigBuilder;
+
+// Custom rejection for CSRF validation failures
+#[derive(Debug)]
+struct CSRFRejection;
+
+impl warp::reject::Reject for CSRFRejection {}
 
 #[tokio::main]
 async fn main() {
@@ -20,6 +32,10 @@ async fn main() {
 
     // Initialize logging
     env_logger::init();
+    
+    // Initialize security logging and production warnings
+    init_security_logger();
+    init_production_warnings().await;
 
     // Load config from .env
     let config = match ServerConfig::from_env() {
@@ -56,9 +72,58 @@ async fn main() {
         thread_pool.worker_count()
     );
 
-    // Create token manager
-    let token_manager = std::sync::Arc::new(TokenManager::new(&config.jwt_secret));
-    info!("JWT authentication initialized");
+    // Create token revocation store
+    let revocation_store = create_memory_revocation_store();
+    
+    // Create token manager with revocation support
+    let token_manager = std::sync::Arc::new(TokenManager::with_revocation_store(
+        &config.jwt_secret,
+        revocation_store.clone()
+    ));
+    info!("JWT authentication initialized with token revocation support");
+
+    // Create CSRF protection
+    let allowed_origins = std::env::var("RUSTY_SOCKS_ALLOWED_ORIGINS")
+        .map(|origins| origins.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_else(|_| Vec::new());
+    
+    let csrf_protection = std::sync::Arc::new(CSRFProtection::new(
+        allowed_origins,
+        config.development_mode,
+        config.csrf_secret.clone(), // Use dedicated CSRF secret (separated from JWT for security)
+    ));
+    info!("CSRF protection initialized");
+
+    // Create IP extraction configuration
+    let ip_config = if config.development_mode {
+        IpExtractionConfig::development()
+    } else {
+        // In production, configure trusted proxies from environment
+        let trusted_proxies = std::env::var("RUSTY_SOCKS_TRUSTED_PROXIES")
+            .map(|proxies| {
+                proxies.split(',')
+                    .filter_map(|ip_str| {
+                        match ip_str.trim().parse() {
+                            Ok(ip) => Some(ip),
+                            Err(e) => {
+                                warn!("Invalid trusted proxy IP '{}': {}", ip_str.trim(), e);
+                                None
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|_| Vec::new());
+        
+        if trusted_proxies.is_empty() {
+            info!("No trusted proxies configured, using direct connection IPs only");
+            IpExtractionConfig::default()
+        } else {
+            info!("Configured {} trusted proxies", trusted_proxies.len());
+            IpExtractionConfig::production_with_proxy(trusted_proxies)
+        }
+    };
+    let ip_config = std::sync::Arc::new(ip_config);
 
     // Start cleanup task for stale connections
     server_manager.clone().start_cleanup_task(
@@ -67,28 +132,42 @@ async fn main() {
     );
     info!("Stale connection cleanup task started");
 
-    // Create WebSocket route with thread pool
+    // Create WebSocket route with thread pool and CSRF protection
     let ws_route = warp::path(WS_PATH)
         .and(warp::ws())
-        .and(warp::filters::query::raw().or(warp::any().map(|| String::new())).unify())
+        .and(warp::header::headers_cloned())
+        .and(csrf_validation_filter(csrf_protection.clone()))
+        .and(warp::path::full())
+        .and(warp::addr::remote())
         .and(with_server_manager(server_manager.clone()))
         .and(with_thread_pool(thread_pool.clone()))
         .and(with_token_manager(token_manager.clone()))
+        .and(with_ip_config(ip_config.clone()))
+        .and(with_config(Arc::new(config.clone())))
         .map(
             |ws: warp::ws::Ws,
-             query: String,
+             headers: warp::hyper::HeaderMap,
+             path: warp::path::FullPath,
+             remote_addr: Option<std::net::SocketAddr>,
              server_manager: SharedServerManager,
              thread_pool: SharedThreadPool,
-             token_manager: std::sync::Arc<TokenManager>| {
-                info!("New websocket connection");
+             token_manager: std::sync::Arc<TokenManager>,
+             ip_config: std::sync::Arc<IpExtractionConfig>,
+             config: Arc<ServerConfig>| {
+                // SECURITY: Extract real client IP address
+                let client_ip = extract_client_ip(&headers, remote_addr, &ip_config);
+                info!("New websocket connection from IP: {}", client_ip);
 
-                // Extract token from query string
-                let token = extract_token_from_query(&query);
+                // SECURITY: Extract token from secure headers only (no URL tokens allowed)
+                let token = {
+                    use rusty_socks::handlers::auth::extract_token_comprehensive;
+                    extract_token_comprehensive(&path.as_str().parse().unwrap_or_default(), &headers)
+                };
 
                 ws.on_upgrade(move |socket| {
                     // Use the thread pool to handle the WebSocket client
                     let handle_client =
-                        handle_ws_client(socket, server_manager, token, token_manager);
+                        handle_ws_client(socket, server_manager, token, token_manager, config, client_ip);
                     match thread_pool.execute(handle_client) {
                         Some(_) => info!("WebSocket connection processing assigned to thread pool"),
                         None => error!("Thread pool is at capacity, connection rejected"),
@@ -101,30 +180,19 @@ async fn main() {
 
     // Create health check route with security headers
     let health_route = warp::path("health")
-        .map(|| "OK")
-        .with(warp::reply::with::header("X-Content-Type-Options", "nosniff"))
-        .with(warp::reply::with::header("X-Frame-Options", "DENY"))
-        .with(warp::reply::with::header("X-XSS-Protection", "1; mode=block"))
-        .with(warp::reply::with::header("Strict-Transport-Security", "max-age=31536000; includeSubDomains"))
-        .with(warp::reply::with::header("Referrer-Policy", "strict-origin-when-cross-origin"))
-        .with(warp::reply::with::header("Content-Security-Policy", "default-src 'self'"));
+        .map(|| with_security_headers("OK"));
 
     // Create thread pool stats route with security headers
     let stats_route = warp::path("stats")
         .and(with_thread_pool(thread_pool.clone()))
         .map(|thread_pool: SharedThreadPool| {
             let active_tasks = thread_pool.active_task_count().unwrap_or(0);
-            warp::reply::json(&serde_json::json!({
+            let json_response = warp::reply::json(&serde_json::json!({
                 "worker_threads": thread_pool.worker_count(),
                 "active_tasks": active_tasks
-            }))
-        })
-        .with(warp::reply::with::header("X-Content-Type-Options", "nosniff"))
-        .with(warp::reply::with::header("X-Frame-Options", "DENY"))
-        .with(warp::reply::with::header("X-XSS-Protection", "1; mode=block"))
-        .with(warp::reply::with::header("Strict-Transport-Security", "max-age=31536000; includeSubDomains"))
-        .with(warp::reply::with::header("Referrer-Policy", "strict-origin-when-cross-origin"))
-        .with(warp::reply::with::header("Content-Security-Policy", "default-src 'self'"));
+            }));
+            with_api_security_headers(json_response)
+        });
 
     // Combine routes
     let routes = ws_route.or(health_route).or(stats_route);
@@ -138,10 +206,43 @@ async fn main() {
         }
     };
 
-    // Start the server
-    info!("Starting Rusty Socks server on {}", addr);
+    // Start the server with optional TLS
+    if config.enable_tls {
+        // TLS configuration
+        let _tls_config = if let (Some(cert_path), Some(key_path)) = (&config.tls_cert_path, &config.tls_key_path) {
+            info!("Loading TLS configuration...");
+            match TlsConfigBuilder::new(cert_path.clone(), key_path.clone()).build() {
+                Ok(tls_config) => {
+                    info!("TLS configuration loaded successfully");
+                    tls_config
+                },
+                Err(e) => {
+                    error!("Failed to load TLS configuration: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            error!("TLS is enabled but certificate or key path is missing");
+            std::process::exit(1);
+        };
 
-    warp::serve(routes).run(addr).await;
+        info!("Starting SECURE Rusty Socks server (HTTPS/WSS) on {}", addr);
+        warp::serve(routes)
+            .tls()
+            .cert_path(config.tls_cert_path.as_ref().unwrap())
+            .key_path(config.tls_key_path.as_ref().unwrap())
+            .run(addr)
+            .await;
+    } else {
+        if !config.development_mode {
+            warn!("⚠️  SECURITY WARNING: Running in INSECURE mode (HTTP/WS) in production!");
+            warn!("⚠️  Enable TLS by setting RUSTY_SOCKS_ENABLE_TLS=true");
+            warn!("⚠️  Provide certificate with RUSTY_SOCKS_TLS_CERT_PATH and RUSTY_SOCKS_TLS_KEY_PATH");
+        }
+        
+        info!("Starting Rusty Socks server (HTTP/WS) on {}", addr);
+        warp::serve(routes).run(addr).await;
+    }
 }
 
 // Helper function to include server manager in request
@@ -165,13 +266,53 @@ fn with_token_manager(
     warp::any().map(move || token_manager.clone())
 }
 
-// Helper function to extract token from query string
-fn extract_token_from_query(query: &str) -> Option<String> {
-    query.split('&').find_map(|pair| {
-        let mut parts = pair.split('=');
-        match (parts.next(), parts.next()) {
-            (Some("token"), Some(value)) => Some(value.to_string()),
-            _ => None,
-        }
-    })
+// Helper function to include config in request
+fn with_config(
+    config: Arc<ServerConfig>,
+) -> impl Filter<Extract = (Arc<ServerConfig>,), Error = Infallible> + Clone {
+    warp::any().map(move || config.clone())
 }
+
+
+// Helper function to include IP config in request
+fn with_ip_config(
+    ip_config: std::sync::Arc<IpExtractionConfig>,
+) -> impl Filter<Extract = (std::sync::Arc<IpExtractionConfig>,), Error = Infallible> + Clone {
+    warp::any().map(move || ip_config.clone())
+}
+
+// CSRF validation filter that rejects connections before WebSocket upgrade
+fn csrf_validation_filter(
+    csrf_protection: std::sync::Arc<CSRFProtection>,
+) -> impl Filter<Extract = (), Error = warp::Rejection> + Clone {
+    warp::header::headers_cloned()
+        .and_then(move |headers: warp::hyper::HeaderMap| {
+            let csrf = csrf_protection.clone();
+            async move {
+                match csrf.validate_websocket_connection(&headers) {
+                    CSRFValidationResult::Valid => {
+                        info!("CSRF validation passed for WebSocket connection");
+                        Ok(())
+                    }
+                    CSRFValidationResult::InvalidOrigin(msg) => {
+                        error!("CSRF validation failed - Invalid origin: {}", msg);
+                        Err(warp::reject::custom(CSRFRejection))
+                    }
+                    CSRFValidationResult::MissingHeaders(msg) => {
+                        error!("CSRF validation failed - Missing headers: {}", msg);
+                        Err(warp::reject::custom(CSRFRejection))
+                    }
+                    CSRFValidationResult::Suspicious(msg) => {
+                        error!("CSRF validation failed - Suspicious request: {}", msg);
+                        Err(warp::reject::custom(CSRFRejection))
+                    }
+                    _ => {
+                        error!("CSRF validation failed for WebSocket connection");
+                        Err(warp::reject::custom(CSRFRejection))
+                    }
+                }
+            }
+        })
+        .untuple_one()
+}
+

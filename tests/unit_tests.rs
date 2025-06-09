@@ -14,16 +14,16 @@ mod auth_tests {
             "user123".to_string(),
             "testuser".to_string(),
             Some("test@example.com".to_string()),
-        );
+        ).unwrap();
 
         // Generate token
         let token = token_manager.generate_token(&claims).unwrap();
         assert!(!token.is_empty());
 
-        // Validate token
-        let validated = token_manager.validate_token(&token).unwrap();
+        // Validate token (using sync version for tests)
+        let validated = token_manager.validate_token_sync(&token).unwrap();
         assert_eq!(validated.claims.sub, "user123");
-        assert_eq!(validated.claims.username, "testuser");
+        assert_eq!(validated.claims.username, Some("testuser".to_string()));
     }
 
     #[test]
@@ -131,16 +131,16 @@ mod integration_tests {
 
         // Create user and generate token
         let user = User::new("test-id".to_string(), "testuser".to_string());
-        let claims = Claims::new(user.id.clone(), user.username.clone(), None);
+        let claims = Claims::new(user.id.clone(), user.username.clone(), None).unwrap();
         let token = token_manager.generate_token(&claims).unwrap();
 
-        // Validate token
-        let validated_claims = token_manager.get_claims(&token).unwrap();
+        // Validate token (using sync version for tests)
+        let validated_claims = token_manager.get_claims_sync(&token).unwrap();
         assert_eq!(validated_claims.sub, user.id);
-        assert_eq!(validated_claims.username, user.username);
+        assert_eq!(validated_claims.username, Some(user.username));
 
-        // Test user ID extraction
-        let extracted_id = token_manager.validate_and_get_user_id(&token).unwrap();
+        // Test user ID extraction (using sync version for tests)
+        let extracted_id = token_manager.validate_and_get_user_id_sync(&token).unwrap();
         assert_eq!(extracted_id, user.id);
     }
 }

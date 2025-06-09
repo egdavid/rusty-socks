@@ -5,17 +5,44 @@ use serde_json;
 
 use crate::core::message_types::{ClientMessage, RoomInfo, ServerMessage, UserInfo};
 use crate::core::server::SharedServerManager;
+use crate::core::OperationType;
+use crate::security::{
+    protect_user_content, clean_user_input, contains_xss_patterns,
+    UnicodeSecurityValidator, UnicodeSecurityConfig, UnicodeSecurityError
+};
 use crate::error::{Result, RustySocksError};
 
 /// Handles incoming client messages and routes them appropriately
 pub struct MessageHandler {
     server: SharedServerManager,
+    unicode_validator: UnicodeSecurityValidator,
 }
 
 impl MessageHandler {
     /// Create a new message handler
     pub fn new(server: SharedServerManager) -> Self {
-        Self { server }
+        // Configure Unicode validator for chat messages
+        let mut config = UnicodeSecurityConfig::default();
+        config.max_normalized_length = 2000; // Match MAX_MESSAGE_LENGTH
+        config.allow_mixed_scripts = false; // Prevent homograph attacks
+        config.allow_bidirectional = false; // Prevent BiDi spoofing
+        config.allow_private_use = false; // Block private use characters
+        
+        Self { 
+            server,
+            unicode_validator: UnicodeSecurityValidator::with_config(config),
+        }
+    }
+    
+    /// Create a Unicode validator specifically configured for room names
+    fn create_room_name_validator(&self) -> UnicodeSecurityValidator {
+        let mut config = UnicodeSecurityConfig::default();
+        config.max_normalized_length = 50; // Shorter limit for room names
+        config.allow_mixed_scripts = false; // Strict: prevent homograph attacks
+        config.allow_bidirectional = false; // Prevent BiDi spoofing in room names
+        config.allow_private_use = false; // Block private use characters
+        
+        UnicodeSecurityValidator::with_config(config)
     }
     
     /// Helper to send message to user with proper error logging
@@ -37,40 +64,84 @@ impl MessageHandler {
         }
     }
     
-    /// Validate message content for security and quality
-    fn validate_message_content(&self, content: &str) -> std::result::Result<(), String> {
+    /// Validate message content for security and quality with comprehensive Unicode protection
+    fn validate_message_content(&self, content: &str) -> std::result::Result<String, String> {
         // Check if message is empty or only whitespace
         if content.trim().is_empty() {
             return Err("Message cannot be empty".to_string());
         }
         
+        // SECURITY: Comprehensive Unicode validation to prevent Unicode-based attacks
+        let validated_content = match self.unicode_validator.validate(content) {
+            Ok(safe_content) => safe_content,
+            Err(unicode_error) => {
+                let error_msg = match unicode_error {
+                    UnicodeSecurityError::ControlCharacters(details) => {
+                        log::warn!("Message blocked: Control characters detected - {}", details);
+                        "Message contains dangerous control characters".to_string()
+                    },
+                    UnicodeSecurityError::BidirectionalOverride(details) => {
+                        log::warn!("Message blocked: BiDi attack detected - {}", details);
+                        "Message contains bidirectional text formatting that could be malicious".to_string()
+                    },
+                    UnicodeSecurityError::HomographAttack(details) => {
+                        log::warn!("Message blocked: Homograph attack detected - {}", details);
+                        "Message contains lookalike characters that could be deceptive".to_string()
+                    },
+                    UnicodeSecurityError::MixedScriptAttack(details) => {
+                        log::warn!("Message blocked: Mixed script attack detected - {}", details);
+                        "Message mixes different writing systems in a suspicious way".to_string()
+                    },
+                    UnicodeSecurityError::InvalidUnicode(details) => {
+                        log::warn!("Message blocked: Invalid Unicode - {}", details);
+                        "Message contains invalid Unicode sequences".to_string()
+                    },
+                    UnicodeSecurityError::NormalizationAttack(details) => {
+                        log::warn!("Message blocked: Normalization attack - {}", details);
+                        "Message contains Unicode normalization attack".to_string()
+                    },
+                    UnicodeSecurityError::NormalizationExpansion(details) => {
+                        log::warn!("Message blocked: Normalization expansion - {}", details);
+                        "Message too long after Unicode normalization".to_string()
+                    },
+                    UnicodeSecurityError::InvisibleCharacters(details) => {
+                        log::warn!("Message blocked: Invisible characters - {}", details);
+                        "Message contains invisible characters".to_string()
+                    },
+                    UnicodeSecurityError::PrivateUseCharacters(details) => {
+                        log::warn!("Message blocked: Private use characters - {}", details);
+                        "Message contains private use Unicode characters".to_string()
+                    },
+                };
+                return Err(error_msg);
+            }
+        };
+        
+        // Additional legacy validations (still useful as secondary checks)
+        
         // Check message length (prevent DoS with huge messages)
         const MAX_MESSAGE_LENGTH: usize = 2000;
-        if content.len() > MAX_MESSAGE_LENGTH {
+        if validated_content.len() > MAX_MESSAGE_LENGTH {
             return Err(format!("Message too long. Maximum {} characters allowed", MAX_MESSAGE_LENGTH));
         }
         
         // Check for excessive repeated characters (spam detection)
-        if self.has_excessive_repetition(content) {
+        if self.has_excessive_repetition(&validated_content) {
             return Err("Message contains excessive repeated characters".to_string());
         }
         
         // Check for suspicious patterns that might be injection attempts
-        if self.contains_suspicious_patterns(content) {
+        if self.contains_suspicious_patterns(&validated_content) {
             return Err("Message contains suspicious content".to_string());
         }
         
-        // Check for null bytes or other dangerous characters
-        if content.contains('\0') {
-            return Err("Message contains invalid characters".to_string());
+        // Check for null bytes (should be caught by Unicode validation but double-check)
+        if validated_content.contains('\0') {
+            return Err("Message contains null bytes".to_string());
         }
         
-        // Ensure valid UTF-8 encoding (should already be guaranteed by Rust, but explicit check)
-        if !content.is_ascii() && !content.chars().all(|c| c.is_alphabetic() || c.is_numeric() || c.is_whitespace() || ".,!?;:()-'\"@#$%^&*+=[]{}|\\/<>".contains(c)) {
-            return Err("Message contains unsupported characters".to_string());
-        }
-        
-        Ok(())
+        // Return the validated and normalized content
+        Ok(validated_content)
     }
     
     /// Check for excessive character repetition (simple spam detection)
@@ -99,24 +170,22 @@ impl MessageHandler {
     
     /// Check for suspicious patterns that might indicate injection attempts
     fn contains_suspicious_patterns(&self, content: &str) -> bool {
-        let suspicious_patterns = [
-            "<script", "</script>", "javascript:", "onclick=", "onerror=", "onload=",
-            "eval(", "setTimeout(", "setInterval(",
-            "document.cookie", "window.location", "XMLHttpRequest",
-            "fetch(", "innerHTML", "outerHTML",
-        ];
-        
-        let content_lower = content.to_lowercase();
-        suspicious_patterns.iter().any(|&pattern| content_lower.contains(pattern))
+        // Use the comprehensive XSS protection
+        contains_xss_patterns(content)
     }
 
     /// Process a client message
     pub async fn handle_client_message(&self, sender_id: &str, message_text: &str) -> Result<()> {
-        // Validate overall message size first
-        const MAX_JSON_MESSAGE_SIZE: usize = 10240; // 10KB max
+        // SECURITY: Reduced message size limit to prevent DoS attacks
+        const MAX_JSON_MESSAGE_SIZE: usize = 2048; // 2KB max (was 8KB, reduced for security)
+        
         if message_text.len() > MAX_JSON_MESSAGE_SIZE {
+            log::warn!("Large message rejected from {}: {} bytes", sender_id, message_text.len());
             return Err(RustySocksError::MessageTooLarge(message_text.len()));
         }
+        
+        // Track message processing stats for monitoring
+        let processing_start = std::time::Instant::now();
         
         // Validate JSON structure (basic security check)
         if message_text.matches('{').count() != message_text.matches('}').count() ||
@@ -185,20 +254,62 @@ impl MessageHandler {
             ClientMessage::KickUser { room_id, user_id } => {
                 self.handle_kick_user(sender_id, &room_id, &user_id).await
             }
+        }?;
+        
+        // SECURITY: Track message processing time and size for monitoring
+        let processing_time = processing_start.elapsed();
+        if processing_time.as_millis() > 100 {
+            log::warn!("Slow message processing: {}ms for user {} (size: {} bytes)", 
+                       processing_time.as_millis(), sender_id, message_text.len());
         }
+        
+        log::trace!("Message processed: user={}, size={} bytes, time={}ms", 
+                   sender_id, message_text.len(), processing_time.as_millis());
+        
+        Ok(())
     }
 
     /// Handle join room request
     async fn handle_join_room(&self, sender_id: &str, room_id: String) -> Result<()> {
+        // SECURITY: Validate and clean room ID to prevent XSS
+        let cleaned_room_id = match clean_user_input(&room_id) {
+            Some(cleaned) => cleaned,
+            None => {
+                let error_msg = ServerMessage::Error {
+                    code: "INVALID_ROOM_ID".to_string(),
+                    message: "Invalid room ID. Room names can only contain letters, numbers, hyphens, and underscores.".to_string(),
+                };
+                let error_str = serde_json::to_string(&error_msg).unwrap();
+                self.send_to_user_safe(sender_id, &error_str, "error message").await;
+                return Err(RustySocksError::ValidationError("Invalid room ID".to_string()));
+            }
+        };
+
+        // Check multi-tier rate limiting for room management
+        let user_tier = self.server.determine_user_tier(sender_id).await;
+        let user_ip = self.server.get_user_ip(sender_id).await.unwrap_or_else(|| {
+            log::warn!("Could not get IP for user {}, using localhost fallback", sender_id);
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        });
+        
+        if !self.server.can_user_perform_operation(sender_id, user_ip, user_tier, OperationType::RoomManagement).await {
+            let error_msg = ServerMessage::Error {
+                code: "RATE_LIMITED".to_string(),
+                message: "Room management rate limit exceeded. Please wait before joining/leaving rooms.".to_string(),
+            };
+            let msg_str = serde_json::to_string(&error_msg).unwrap();
+            self.send_to_user_safe(sender_id, &msg_str, "rate limit error").await;
+            return Err(RustySocksError::Forbidden);
+        }
         match self
             .server
-            .join_room(sender_id.to_string(), room_id.clone())
+            .join_room(sender_id.to_string(), cleaned_room_id.clone())
             .await
         {
             Ok(_) => {
                 // Send success message
                 let success_msg = ServerMessage::Success {
-                    message: format!("Joined room: {}", room_id),
+                    message: format!("Joined room: {}", cleaned_room_id),
                     data: None,
                 };
                 let msg_str = serde_json::to_string(&success_msg).unwrap();
@@ -206,12 +317,12 @@ impl MessageHandler {
 
                 // Notify room members
                 let join_notification = ServerMessage::UserJoined {
-                    room_id: room_id.clone(),
+                    room_id: cleaned_room_id.clone(),
                     user_id: sender_id.to_string(),
-                    username: self.server.get_user_info(sender_id).await.unwrap_or_else(|| "Unknown".to_string()),
+                    username: protect_user_content(&self.server.get_user_info(sender_id).await.unwrap_or_else(|| "Unknown".to_string())),
                 };
                 let notification_str = serde_json::to_string(&join_notification).unwrap();
-                self.broadcast_to_room_safe(&room_id, &notification_str, Some(sender_id), "join notification").await;
+                self.broadcast_to_room_safe(&cleaned_room_id, &notification_str, Some(sender_id), "join notification").await;
 
                 Ok(())
             }
@@ -229,6 +340,22 @@ impl MessageHandler {
 
     /// Handle leave room request
     async fn handle_leave_room(&self, sender_id: &str, room_id: &str) -> Result<()> {
+        // Check multi-tier rate limiting for room management
+        let user_tier = self.server.determine_user_tier(sender_id).await;
+        let user_ip = self.server.get_user_ip(sender_id).await.unwrap_or_else(|| {
+            log::warn!("Could not get IP for user {}, using localhost fallback", sender_id);
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        });
+        
+        if !self.server.can_user_perform_operation(sender_id, user_ip, user_tier, OperationType::RoomManagement).await {
+            let error_msg = ServerMessage::Error {
+                code: "RATE_LIMITED".to_string(),
+                message: "Room management rate limit exceeded. Please wait before joining/leaving rooms.".to_string(),
+            };
+            let msg_str = serde_json::to_string(&error_msg).unwrap();
+            self.send_to_user_safe(sender_id, &msg_str, "rate limit error").await;
+            return Err(RustySocksError::Forbidden);
+        }
         match self.server.leave_room(sender_id, room_id).await {
             Ok(_) => {
                 // Notify room members
@@ -261,25 +388,49 @@ impl MessageHandler {
         room_id: &str,
         content: &str,
     ) -> Result<()> {
-        // Validate message content first
-        if let Err(validation_error) = self.validate_message_content(content) {
-            let error_msg = ServerMessage::Error {
-                code: "INVALID_MESSAGE".to_string(),
-                message: validation_error.clone(),
-            };
-            let error_str = serde_json::to_string(&error_msg).unwrap();
-            self.send_to_user_safe(sender_id, &error_str, "validation error").await;
-            return Err(RustySocksError::ValidationError(validation_error));
-        }
+        // Validate message content first and get the validated (normalized) content
+        let validated_content = match self.validate_message_content(content) {
+            Ok(safe_content) => safe_content,
+            Err(validation_error) => {
+                let error_msg = ServerMessage::Error {
+                    code: "INVALID_MESSAGE".to_string(),
+                    message: validation_error.clone(),
+                };
+                let error_str = serde_json::to_string(&error_msg).unwrap();
+                self.send_to_user_safe(sender_id, &error_str, "validation error").await;
+                return Err(RustySocksError::ValidationError(validation_error));
+            }
+        };
         
-        // Check rate limiting
-        if !self.server.can_user_send_message_rate_limit(sender_id).await {
+        // Check multi-tier rate limiting
+        let user_tier = self.server.determine_user_tier(sender_id).await;
+        let user_ip = self.server.get_user_ip(sender_id).await.unwrap_or_else(|| {
+            log::warn!("Could not get IP for user {}, using localhost fallback", sender_id);
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        });
+        
+        if !self.server.can_user_perform_operation(sender_id, user_ip, user_tier.clone(), OperationType::Message).await {
+            // Get rate limit status for more detailed error message
+            let status_msg = if let Some(status) = self.server.get_user_rate_status(sender_id).await {
+                if status.penalty_level > 1.0 {
+                    format!("Rate limit exceeded. Penalty level: {:.1}x (violations: {}). Please slow down.", 
+                           status.penalty_level, status.violation_count)
+                } else {
+                    format!("Rate limit exceeded. You have sent {} messages recently. Please slow down.", 
+                           status.recent_requests)
+                }
+            } else {
+                "Rate limit exceeded. Please slow down.".to_string()
+            };
+            
             let error_msg = ServerMessage::Error {
                 code: "RATE_LIMITED".to_string(),
-                message: "You are sending messages too quickly. Please slow down.".to_string(),
+                message: status_msg,
             };
             let error_str = serde_json::to_string(&error_msg).unwrap();
             self.send_to_user_safe(sender_id, &error_str, "rate limit error").await;
+            
+            log::info!("Rate limit exceeded for user {} (tier: {:?})", sender_id, user_tier);
             return Err(RustySocksError::Forbidden);
         }
         
@@ -314,11 +465,14 @@ impl MessageHandler {
         let sender_username = self.server.get_user_info(sender_id).await
             .unwrap_or_else(|| "Unknown".to_string());
 
+        // SECURITY: Apply additional XSS protection to the already Unicode-validated content
+        let protected_content = protect_user_content(&validated_content);
+
         let room_message = ServerMessage::RoomMessage {
             room_id: room_id.to_string(),
             sender_id: sender_id.to_string(),
-            sender_username,
-            content: content.to_string(),
+            sender_username: protect_user_content(&sender_username),
+            content: protected_content,
             timestamp: chrono::Utc::now(),
         };
 
@@ -355,10 +509,40 @@ impl MessageHandler {
         target_user_id: &str,
         content: &str,
     ) -> Result<()> {
+        // Validate message content first and get the validated (normalized) content
+        let validated_content = match self.validate_message_content(content) {
+            Ok(safe_content) => safe_content,
+            Err(validation_error) => {
+                let error_msg = ServerMessage::Error {
+                    code: "INVALID_MESSAGE".to_string(),
+                    message: validation_error.clone(),
+                };
+                let error_str = serde_json::to_string(&error_msg).unwrap();
+                self.send_to_user_safe(sender_id, &error_str, "validation error").await;
+                return Err(RustySocksError::ValidationError(validation_error));
+            }
+        };
+        
+        // Check multi-tier rate limiting for private messages
+        let user_tier = self.server.determine_user_tier(sender_id).await;
+        let user_ip = self.server.get_user_ip(sender_id).await.unwrap_or_else(|| {
+            log::warn!("Could not get IP for user {}, using localhost fallback", sender_id);
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        });
+        
+        if !self.server.can_user_perform_operation(sender_id, user_ip, user_tier, OperationType::PrivateMessage).await {
+            let error_msg = ServerMessage::Error {
+                code: "RATE_LIMITED".to_string(),
+                message: "Private message rate limit exceeded. Please slow down.".to_string(),
+            };
+            let error_str = serde_json::to_string(&error_msg).unwrap();
+            self.send_to_user_safe(sender_id, &error_str, "rate limit error").await;
+            return Err(RustySocksError::Forbidden);
+        }
         let private_message = ServerMessage::PrivateMessage {
             sender_id: sender_id.to_string(),
             sender_username: self.server.get_user_info(sender_id).await.unwrap_or_else(|| "Unknown".to_string()),
-            content: content.to_string(),
+            content: protect_user_content(&validated_content), // Apply XSS protection to validated content
             timestamp: chrono::Utc::now(),
         };
 
@@ -385,12 +569,28 @@ impl MessageHandler {
         name: String,
         max_members: Option<usize>,
     ) -> Result<()> {
+        // Check multi-tier rate limiting for room creation (very restrictive)
+        let user_tier = self.server.determine_user_tier(sender_id).await;
+        let user_ip = self.server.get_user_ip(sender_id).await.unwrap_or_else(|| {
+            log::warn!("Could not get IP for user {}, using localhost fallback", sender_id);
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        });
+        
+        if !self.server.can_user_perform_operation(sender_id, user_ip, user_tier.clone(), OperationType::RoomCreation).await {
+            let error_msg = ServerMessage::Error {
+                code: "RATE_LIMITED".to_string(),
+                message: "Room creation rate limit exceeded. Please wait before creating another room.".to_string(),
+            };
+            let msg_str = serde_json::to_string(&error_msg).unwrap();
+            self.send_to_user_safe(sender_id, &msg_str, "rate limit error").await;
+            return Err(RustySocksError::Forbidden);
+        }
         // Check if user has permission to create rooms
         let user_info = self.server.get_user_info(sender_id).await;
         let has_permission = if let Some(info) = user_info {
             // Check if user has global CreateRooms permission
             // For now, check if user has Admin/Owner role in any room or global role
-            // In a real system, you'd check against a user database
+            // TODO: check against a user database
             info.contains("Admin") || info.contains("Owner")
         } else {
             // Anonymous users cannot create rooms
@@ -409,8 +609,55 @@ impl MessageHandler {
             ));
         }
 
-        // Validate room name
-        if name.trim().is_empty() {
+        // SECURITY: Comprehensive Unicode validation for room names
+        let room_name_validator = self.create_room_name_validator();
+        let validated_room_name = match room_name_validator.validate(&name) {
+            Ok(safe_name) => safe_name,
+            Err(unicode_error) => {
+                let (error_code, error_msg) = match unicode_error {
+                    UnicodeSecurityError::ControlCharacters(_) => {
+                        ("INVALID_CHARACTERS", "Room name contains dangerous control characters")
+                    },
+                    UnicodeSecurityError::BidirectionalOverride(_) => {
+                        ("INVALID_CHARACTERS", "Room name contains bidirectional formatting")
+                    },
+                    UnicodeSecurityError::HomographAttack(_) => {
+                        ("HOMOGRAPH_ATTACK", "Room name contains lookalike characters that could be deceptive")
+                    },
+                    UnicodeSecurityError::MixedScriptAttack(_) => {
+                        ("MIXED_SCRIPTS", "Room name mixes different writing systems")
+                    },
+                    UnicodeSecurityError::InvalidUnicode(_) => {
+                        ("INVALID_UNICODE", "Room name contains invalid Unicode")
+                    },
+                    UnicodeSecurityError::NormalizationAttack(_) => {
+                        ("NORMALIZATION_ATTACK", "Room name contains Unicode normalization attack")
+                    },
+                    UnicodeSecurityError::NormalizationExpansion(_) => {
+                        ("NAME_TOO_LONG", "Room name too long after normalization")
+                    },
+                    UnicodeSecurityError::InvisibleCharacters(_) => {
+                        ("INVALID_CHARACTERS", "Room name contains invisible characters")
+                    },
+                    UnicodeSecurityError::PrivateUseCharacters(_) => {
+                        ("INVALID_CHARACTERS", "Room name contains private Unicode characters")
+                    },
+                };
+                
+                log::warn!("Room creation blocked: {} - {:?}", error_msg, unicode_error);
+                
+                let error_response = ServerMessage::Error {
+                    code: error_code.to_string(),
+                    message: error_msg.to_string(),
+                };
+                let msg_str = serde_json::to_string(&error_response).unwrap();
+                self.send_to_user_safe(sender_id, &msg_str, "validation error").await;
+                return Err(RustySocksError::ValidationError(error_msg.to_string()));
+            }
+        };
+
+        // Basic length check (after Unicode normalization)
+        if validated_room_name.trim().is_empty() {
             let error_msg = ServerMessage::Error {
                 code: "INVALID_NAME".to_string(),
                 message: "Room name cannot be empty".to_string(),
@@ -422,15 +669,31 @@ impl MessageHandler {
             ));
         }
 
-        if name.len() > 50 {
+        // Additional basic checks (most security checks are now handled by Unicode validation)
+        
+        // Check for path traversal patterns (extra security layer)
+        if validated_room_name.contains("..") || validated_room_name.contains("./") || validated_room_name.contains(".\\") {
             let error_msg = ServerMessage::Error {
-                code: "NAME_TOO_LONG".to_string(),
-                message: "Room name must be 50 characters or less".to_string(),
+                code: "INVALID_PATTERN".to_string(),
+                message: "Room name contains invalid patterns".to_string(),
             };
             let msg_str = serde_json::to_string(&error_msg).unwrap();
             self.send_to_user_safe(sender_id, &msg_str, "validation error").await;
             return Err(RustySocksError::ValidationError(
-                "Room name too long".to_string()
+                "Path traversal attempt in room name".to_string()
+            ));
+        }
+
+        // Ensure minimum length (after Unicode normalization and trimming)
+        if validated_room_name.trim().len() < 2 {
+            let error_msg = ServerMessage::Error {
+                code: "NAME_TOO_SHORT".to_string(),
+                message: "Room name must be at least 2 characters long".to_string(),
+            };
+            let msg_str = serde_json::to_string(&error_msg).unwrap();
+            self.send_to_user_safe(sender_id, &msg_str, "validation error").await;
+            return Err(RustySocksError::ValidationError(
+                "Room name too short".to_string()
             ));
         }
 
@@ -449,15 +712,15 @@ impl MessageHandler {
             }
         }
 
-        match self.server.create_room(name.clone(), max_members).await {
+        match self.server.create_room(validated_room_name.clone(), max_members).await {
             Ok(room_id) => {
                 let success_msg = ServerMessage::Success {
-                    message: format!("Room '{}' created", name),
+                    message: format!("Room '{}' created", validated_room_name),
                     data: Some(serde_json::json!({ "room_id": room_id })),
                 };
                 let msg_str = serde_json::to_string(&success_msg).unwrap();
                 self.send_to_user_safe(sender_id, &msg_str, "success message").await;
-                log::info!("User {} created room '{}' ({})", sender_id, name, room_id);
+                log::info!("User {} created room '{}' ({})", sender_id, validated_room_name, room_id);
                 Ok(())
             }
             Err(e) => {
@@ -620,6 +883,22 @@ impl MessageHandler {
         user_id: &str,
         duration_hours: Option<u64>,
     ) -> Result<()> {
+        // Check multi-tier rate limiting for moderation actions
+        let user_tier = self.server.determine_user_tier(sender_id).await;
+        let user_ip = self.server.get_user_ip(sender_id).await.unwrap_or_else(|| {
+            log::warn!("Could not get IP for user {}, using localhost fallback", sender_id);
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        });
+        
+        if !self.server.can_user_perform_operation(sender_id, user_ip, user_tier, OperationType::Moderation).await {
+            let error_msg = ServerMessage::Error {
+                code: "RATE_LIMITED".to_string(),
+                message: "Moderation action rate limit exceeded. Please wait before performing another action.".to_string(),
+            };
+            let msg_str = serde_json::to_string(&error_msg).unwrap();
+            self.send_to_user_safe(sender_id, &msg_str, "rate limit error").await;
+            return Err(RustySocksError::Forbidden);
+        }
         // Check if sender has permission to ban users
         match self.server.can_user_moderate(sender_id, room_id, crate::auth::user::Permission::BanUsers).await {
             Ok(true) => {
@@ -689,6 +968,22 @@ impl MessageHandler {
 
     /// Handle kick user request
     async fn handle_kick_user(&self, sender_id: &str, room_id: &str, user_id: &str) -> Result<()> {
+        // Check multi-tier rate limiting for moderation actions
+        let user_tier = self.server.determine_user_tier(sender_id).await;
+        let user_ip = self.server.get_user_ip(sender_id).await.unwrap_or_else(|| {
+            log::warn!("Could not get IP for user {}, using localhost fallback", sender_id);
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        });
+        
+        if !self.server.can_user_perform_operation(sender_id, user_ip, user_tier, OperationType::Moderation).await {
+            let error_msg = ServerMessage::Error {
+                code: "RATE_LIMITED".to_string(),
+                message: "Moderation action rate limit exceeded. Please wait before performing another action.".to_string(),
+            };
+            let msg_str = serde_json::to_string(&error_msg).unwrap();
+            self.send_to_user_safe(sender_id, &msg_str, "rate limit error").await;
+            return Err(RustySocksError::Forbidden);
+        }
         // Check if sender has permission to kick users
         match self.server.can_user_moderate(sender_id, room_id, crate::auth::user::Permission::KickUsers).await {
             Ok(true) => {

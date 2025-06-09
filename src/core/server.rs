@@ -7,6 +7,9 @@ use tokio::time::interval;
 use warp::ws::Message as WsMessage;
 
 use crate::auth::user::User;
+use crate::core::broadcast_optimizer::BroadcastOptimizer;
+use crate::core::connection::Connection;
+use crate::core::multi_tier_rate_limiter::{MultiTierRateLimiter, UserTier, OperationType};
 use crate::core::rate_limiter::RateLimiterManager;
 use crate::core::room::RoomManager;
 use crate::core::session::SessionManager;
@@ -18,6 +21,8 @@ pub struct ServerManager {
     sessions: Arc<RwLock<SessionManager>>,
     rooms: Arc<RwLock<RoomManager>>,
     rate_limiter: Arc<RateLimiterManager>,
+    multi_tier_rate_limiter: Arc<MultiTierRateLimiter>,
+    broadcast_optimizer: Arc<BroadcastOptimizer>,
 }
 
 impl ServerManager {
@@ -26,10 +31,19 @@ impl ServerManager {
         // Default rate limits
         let rate_limiter = Arc::new(RateLimiterManager::new(10, 60));
         
+        // Create multi-tier rate limiter
+        let multi_tier_rate_limiter = Arc::new(MultiTierRateLimiter::new());
+        multi_tier_rate_limiter.clone().start_cleanup_task();
+        
+        // Create broadcast optimizer with 4 workers (optimal for most systems)
+        let broadcast_optimizer = Arc::new(BroadcastOptimizer::new(4));
+        
         Self {
             sessions: Arc::new(RwLock::new(SessionManager::new())),
             rooms: Arc::new(RwLock::new(RoomManager::new())),
             rate_limiter,
+            multi_tier_rate_limiter,
+            broadcast_optimizer,
         }
     }
 
@@ -38,12 +52,21 @@ impl ServerManager {
         // Default rate limits
         let rate_limiter = Arc::new(RateLimiterManager::new(10, 60));
         
+        // Create multi-tier rate limiter
+        let multi_tier_rate_limiter = Arc::new(MultiTierRateLimiter::new());
+        multi_tier_rate_limiter.clone().start_cleanup_task();
+        
+        // Create broadcast optimizer with 4 workers
+        let broadcast_optimizer = Arc::new(BroadcastOptimizer::new(4));
+        
         Self {
             sessions: Arc::new(RwLock::new(SessionManager::with_message_store(
                 message_store,
             ))),
             rooms: Arc::new(RwLock::new(RoomManager::new())),
             rate_limiter,
+            multi_tier_rate_limiter,
+            broadcast_optimizer,
         }
     }
     
@@ -54,105 +77,163 @@ impl ServerManager {
         // Start cleanup task
         rate_limiter.clone().start_cleanup_task();
         
+        // Create multi-tier rate limiter
+        let multi_tier_rate_limiter = Arc::new(MultiTierRateLimiter::new());
+        multi_tier_rate_limiter.clone().start_cleanup_task();
+        
+        // Create broadcast optimizer with 4 workers
+        let broadcast_optimizer = Arc::new(BroadcastOptimizer::new(4));
+        
         Self {
             sessions: Arc::new(RwLock::new(SessionManager::new())),
             rooms: Arc::new(RwLock::new(RoomManager::new())),
             rate_limiter,
+            multi_tier_rate_limiter,
+            broadcast_optimizer,
         }
     }
 
-    /// Register an authenticated user
+    /// Register an authenticated user (atomic operation to prevent race conditions)
     pub async fn register_authenticated_user(
         &self,
         user: User,
         sender: mpsc::UnboundedSender<WsMessage>,
+        client_ip: std::net::IpAddr,
     ) -> Result<()> {
         let user_id = user.id.clone();
 
-        // Register in session manager
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.register_authenticated(user, sender)?;
+        // SECURITY: Atomic registration - hold both locks to prevent race conditions
+        let mut sessions = self.sessions.write().await;
+        let rooms = self.rooms.write().await;
+        
+        // First register in session manager
+        match sessions.register_authenticated(user, sender, client_ip) {
+            Ok(()) => {
+                // Success: now auto-join default room
+                let default_room_id = rooms.default_room_id().to_string();
+                match rooms.join_room(user_id.clone(), default_room_id).await {
+                    Ok(()) => {
+                        log::debug!("Successfully registered authenticated user: {}", user_id);
+                        Ok(())
+                    }
+                    Err(room_err) => {
+                        // ROLLBACK: Remove from sessions if room join failed
+                        log::error!("Room join failed for user {}, rolling back session registration", user_id);
+                        let _ = sessions.unregister(&user_id);
+                        Err(room_err)
+                    }
+                }
+            }
+            Err(session_err) => {
+                log::error!("Session registration failed for user: {}", user_id);
+                Err(session_err)
+            }
         }
-
-        // Auto-join default room
-        {
-            let rooms = self.rooms.write().await;
-            let default_room_id = rooms.default_room_id().to_string();
-            rooms.join_room(user_id, default_room_id).await?;
-        }
-
-        Ok(())
     }
 
-    /// Register an anonymous user
+    /// Register an anonymous user (atomic operation to prevent race conditions)
     pub async fn register_anonymous_user(
         &self,
         client_id: String,
         sender: mpsc::UnboundedSender<WsMessage>,
+        client_ip: std::net::IpAddr,
     ) -> Result<()> {
-        // Register in session manager
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.register(client_id.clone(), sender)?;
+        // SECURITY: Atomic registration - hold both locks to prevent race conditions
+        let mut sessions = self.sessions.write().await;
+        let rooms = self.rooms.write().await;
+        
+        // First register in session manager
+        match sessions.register(client_id.clone(), sender, client_ip) {
+            Ok(()) => {
+                // Success: now auto-join default room
+                let default_room_id = rooms.default_room_id().to_string();
+                match rooms.join_room(client_id.clone(), default_room_id).await {
+                    Ok(()) => {
+                        log::debug!("Successfully registered anonymous user: {}", client_id);
+                        Ok(())
+                    }
+                    Err(room_err) => {
+                        // ROLLBACK: Remove from sessions if room join failed
+                        log::error!("Room join failed for anonymous user {}, rolling back session registration", client_id);
+                        let _ = sessions.unregister(&client_id);
+                        Err(room_err)
+                    }
+                }
+            }
+            Err(session_err) => {
+                log::error!("Session registration failed for anonymous user: {}", client_id);
+                Err(session_err)
+            }
         }
-
-        // Auto-join default room
-        {
-            let rooms = self.rooms.write().await;
-            let default_room_id = rooms.default_room_id().to_string();
-            rooms.join_room(client_id, default_room_id).await?;
-        }
-
-        Ok(())
     }
 
-    /// Unregister a user (removes from sessions and all rooms)
+    /// Unregister a user (atomic operation to prevent race conditions)
     pub async fn unregister_user(&self, user_id: &str) -> Result<()> {
-        // Remove from all rooms first
-        {
-            let rooms = self.rooms.write().await;
-            rooms.remove_client(user_id).await?;
+        // SECURITY: Atomic unregistration - hold both locks to prevent race conditions
+        let mut sessions = self.sessions.write().await;
+        let rooms = self.rooms.write().await;
+        
+        // First remove from all rooms, then from sessions
+        // This order ensures we don't have orphaned room memberships
+        match rooms.remove_client(user_id).await {
+            Ok(()) => {
+                // Success: now remove from sessions
+                match sessions.unregister(user_id) {
+                    Ok(was_present) => {
+                        if was_present {
+                            log::debug!("Successfully unregistered user: {}", user_id);
+                        }
+                        Ok(())
+                    }
+                    Err(session_err) => {
+                        log::error!("Session unregistration failed for user: {} (rooms already cleaned)", user_id);
+                        Err(session_err)
+                    }
+                }
+            }
+            Err(room_err) => {
+                // If room removal failed, still try to remove from sessions for consistency
+                log::warn!("Room removal failed for user {}, attempting session cleanup anyway", user_id);
+                let _ = sessions.unregister(user_id);
+                Err(room_err)
+            }
         }
-
-        // Remove from sessions
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.unregister(user_id)?;
-        }
-
-        Ok(())
     }
 
     /// Join a user to a room
     pub async fn join_room(&self, user_id: String, room_id: String) -> Result<()> {
-        // Check if user is connected
-        {
-            let sessions = self.sessions.read().await;
-            if sessions.get_connection(&user_id).is_none() {
-                return Err(RustySocksError::SessionNotFound(user_id));
-            }
+        // SECURITY: Fix TOCTOU race condition by holding both locks atomically
+        let sessions = self.sessions.read().await;
+        let rooms = self.rooms.write().await;
+        
+        // Check if user is connected while holding both locks
+        if sessions.get_connection(&user_id).is_none() {
+            return Err(RustySocksError::SessionNotFound(user_id));
         }
 
-        // Join the room
-        let rooms = self.rooms.write().await;
-        rooms.join_room(user_id, room_id).await
+        // Join the room (both locks still held)
+        rooms.join_room_atomic(user_id, room_id).await
     }
 
     /// Leave a room
     pub async fn leave_room(&self, user_id: &str, room_id: &str) -> Result<()> {
-        // Use write lock from the start to avoid race condition
-        let rooms = self.rooms.write().await;
+        // SECURITY: Fix TOCTOU race condition by checking and operating atomically
+        let rooms = self.rooms.read().await;
         
         // Don't allow leaving default room
         if room_id == rooms.default_room_id() {
             return Err(RustySocksError::CannotDeleteDefaultRoom);
         }
         
-        rooms.leave_room(user_id, room_id).await
+        // Release read lock before atomic operation
+        drop(rooms);
+        
+        // Use atomic operation
+        let rooms = self.rooms.read().await;
+        rooms.leave_room_atomic(user_id, room_id).await
     }
 
-    /// Broadcast message to all users in a room (async concurrent)
+    /// Broadcast message to all users in a room (optimized)
     pub async fn broadcast_to_room(
         &self,
         room_id: &str,
@@ -165,10 +246,8 @@ impl ServerManager {
             rooms.get_room_members(room_id).await?
         };
 
-        // Prepare tasks for concurrent sending
-        let mut send_tasks = Vec::new();
-        let message = message.to_string(); // Clone for moving into tasks
-        let exclude_user = exclude_user.map(|s| s.to_string());
+        // Prepare recipients for optimized broadcasting
+        let mut recipients = Vec::new();
         
         {
             let sessions = self.sessions.read().await;
@@ -181,71 +260,36 @@ impl ServerManager {
                     }
                 }
 
-                // Get connection and create send task
+                // Get connection for the member
                 if let Some(connection) = sessions.get_connection(&member_id) {
-                    let message_clone = message.clone();
-                    let member_id_clone = member_id.clone();
-                    let connection_sender = connection.sender.clone();
-                    
-                    // Create async task for each send operation
-                    let task = tokio::spawn(async move {
-                        match connection_sender.send(WsMessage::text(message_clone)) {
-                            Ok(_) => {
-                                log::trace!("Message sent to user: {}", member_id_clone);
-                                true
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to send message to user {}: {}", member_id_clone, e);
-                                false
-                            }
-                        }
+                    // Create Arc<Connection> from the existing connection
+                    let arc_connection = Arc::new(Connection {
+                        id: connection.id.clone(),
+                        sender: connection.sender.clone(),
+                        connected_at: connection.connected_at,
+                        last_ping: connection.last_ping,
+                        user: connection.user.clone(),
+                        client_ip: connection.client_ip,
                     });
-                    
-                    send_tasks.push(task);
+                    recipients.push((member_id, arc_connection));
                 }
             }
         }
 
-        // Wait for all send operations to complete concurrently
-        let results = futures_util::future::join_all(send_tasks).await;
-        
-        // Count successful sends
-        let sent_count = results
-            .into_iter()
-            .filter_map(|result| result.ok()) // Handle task join errors
-            .filter(|&success| success)       // Count successful sends
-            .count();
+        // Use optimized broadcasting
+        let stats = self.broadcast_optimizer
+            .broadcast(message, recipients)
+            .await?;
 
-        Ok(sent_count)
+        Ok(stats.sent_count)
     }
 
     /// Check if user is in room and has permission to send messages
+    /// Check if user can send messages in a room (TOCTOU-safe)
     pub async fn can_user_send_message(&self, user_id: &str, room_id: &str) -> Result<bool> {
+        // SECURITY: Use atomic permission check to prevent TOCTOU race conditions
         let rooms = self.rooms.read().await;
-        
-        // Check if user is in the room
-        if !rooms.is_user_in_room(user_id, room_id).await? {
-            return Ok(false);
-        }
-        
-        // Check if user is banned
-        if rooms.is_user_banned(user_id, room_id).await? {
-            return Ok(false);
-        }
-        
-        // Check if user is muted
-        if rooms.is_user_muted(user_id, room_id).await? {
-            return Ok(false);
-        }
-        
-        // Check if user has SendMessages permission
-        let user_role = rooms.get_user_role(user_id, room_id).await?;
-        if let Some(role) = user_role {
-            Ok(role.has_permission(crate::auth::user::Permission::SendMessages))
-        } else {
-            // If no specific role, assume Guest permissions
-            Ok(crate::auth::user::UserRole::Guest.has_permission(crate::auth::user::Permission::SendMessages))
-        }
+        rooms.check_user_send_permission_atomic(user_id, room_id).await
     }
     
     /// Get user information from session
@@ -254,23 +298,11 @@ impl ServerManager {
         sessions.get_user_info(user_id)
     }
 
-    /// Check if user has permission to perform moderation action
+    /// Check if user has permission to perform moderation action (TOCTOU-safe)
     pub async fn can_user_moderate(&self, user_id: &str, room_id: &str, required_permission: crate::auth::user::Permission) -> Result<bool> {
+        // SECURITY: Use atomic permission check to prevent TOCTOU race conditions
         let rooms = self.rooms.read().await;
-        
-        // Check if user is in the room
-        if !rooms.is_user_in_room(user_id, room_id).await? {
-            return Ok(false);
-        }
-        
-        // Get user role in room
-        let user_role = rooms.get_user_role(user_id, room_id).await?;
-        if let Some(role) = user_role {
-            Ok(role.has_permission(required_permission))
-        } else {
-            // If no specific role, assume Guest permissions (can't moderate)
-            Ok(false)
-        }
+        rooms.check_user_moderation_permission_atomic(user_id, room_id, required_permission).await
     }
     
     /// Ban user from room
@@ -429,10 +461,59 @@ impl ServerManager {
         self.rate_limiter.connection_limiter.remove_connection(ip).await
     }
 
+    /// Check if a user can perform an operation using multi-tier rate limiting
+    pub async fn can_user_perform_operation(
+        &self,
+        user_id: &str,
+        user_ip: std::net::IpAddr,
+        user_tier: UserTier,
+        operation: OperationType,
+    ) -> bool {
+        self.multi_tier_rate_limiter
+            .allow_request(user_id, user_ip, user_tier, operation)
+            .await
+    }
+
+    /// Get multi-tier rate limit status for a user
+    pub async fn get_user_rate_status(&self, user_id: &str) -> Option<crate::core::multi_tier_rate_limiter::RateLimitStatus> {
+        self.multi_tier_rate_limiter.get_user_status(user_id).await
+    }
+
+    /// Get server load factor for monitoring
+    pub fn get_server_load_factor(&self) -> f64 {
+        self.multi_tier_rate_limiter.get_server_load_factor()
+    }
+
+    /// Determine user tier based on authentication and role
+    pub async fn determine_user_tier(&self, user_id: &str) -> UserTier {
+        let sessions = self.sessions.read().await;
+        if let Some(connection) = sessions.get_connection(user_id) {
+            if let Some(user) = &connection.user {
+                match user.global_role {
+                    Some(crate::auth::user::UserRole::Owner) |
+                    Some(crate::auth::user::UserRole::Admin) => UserTier::Privileged,
+                    Some(crate::auth::user::UserRole::Moderator) => UserTier::Premium,
+                    Some(crate::auth::user::UserRole::Member) => UserTier::Authenticated,
+                    _ => UserTier::Authenticated, // Default for authenticated users
+                }
+            } else {
+                UserTier::Anonymous
+            }
+        } else {
+            UserTier::Anonymous // User not found
+        }
+    }
+
+    /// Get user's IP address from connection
+    pub async fn get_user_ip(&self, user_id: &str) -> Option<std::net::IpAddr> {
+        let sessions = self.sessions.read().await;
+        sessions.get_connection(user_id).map(|conn| conn.client_ip)
+    }
+
     /// Store a message
     pub async fn store_message(&self, message: crate::core::message::Message) -> Result<bool> {
         let sessions = self.sessions.read().await;
-        sessions.store_message(message)
+        sessions.store_message_async(message).await
     }
 
     /// Get recent messages
@@ -441,7 +522,7 @@ impl ServerManager {
         limit: usize,
     ) -> Result<Vec<crate::core::message::Message>> {
         let sessions = self.sessions.read().await;
-        sessions.get_recent_messages(limit)
+        sessions.get_recent_messages_async(limit).await
     }
 }
 

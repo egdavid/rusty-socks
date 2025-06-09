@@ -2,6 +2,7 @@ use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use log::{debug, error, info};
 use serde_json;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -18,6 +19,8 @@ pub async fn handle_ws_client(
     server_manager: SharedServerManager,
     token: Option<String>,
     token_manager: Arc<TokenManager>,
+    config: Arc<crate::config::ServerConfig>,
+    client_ip: IpAddr,
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -34,7 +37,7 @@ pub async fn handle_ws_client(
     });
 
     // Authenticate the connection
-    let user = match authenticate_connection(token, &token_manager).await {
+    let user = match authenticate_connection(token, &token_manager, config.allow_anonymous_access).await {
         Ok(user_opt) => {
             if let Some(u) = user_opt {
                 info!("Authenticated user: {}", u.username);
@@ -71,12 +74,20 @@ pub async fn handle_ws_client(
     {
         let result = if let Some(user) = user.clone() {
             server_manager
-                .register_authenticated_user(user, tx.clone())
+                .register_authenticated_user(user, tx.clone(), client_ip)
+                .await
+        } else if config.allow_anonymous_access {
+            server_manager
+                .register_anonymous_user(client_id.clone(), tx.clone(), client_ip)
                 .await
         } else {
-            server_manager
-                .register_anonymous_user(client_id.clone(), tx.clone())
-                .await
+            info!("Anonymous access disabled: connection rejected");
+            let error_msg = serde_json::json!({
+                "type": "error",
+                "message": "Authentication required"
+            });
+            let _ = tx.send(Message::text(error_msg.to_string()));
+            return;
         };
 
         if let Err(e) = result {

@@ -2,19 +2,42 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Types of security events to track
 #[derive(Debug, Clone)]
 pub enum SecurityEvent {
-    AuthenticationFailed { user_id: Option<String>, ip: Option<IpAddr> },
-    RateLimitExceeded { user_id: String, ip: Option<IpAddr> },
+    // Authentication events
+    AuthenticationFailed { user_id: Option<String>, ip: Option<IpAddr>, reason: String },
+    AuthenticationSuccess { user_id: String, ip: Option<IpAddr> },
+    TokenRevoked { user_id: String, token_id: String, reason: String },
+    TokenValidationFailed { token_id: Option<String>, ip: Option<IpAddr>, reason: String },
+    
+    // Authorization events
+    PermissionDenied { user_id: String, action: String, resource: Option<String> },
+    UnauthorizedAccess { user_id: Option<String>, ip: Option<IpAddr>, resource: String },
+    
+    // Rate limiting and abuse
+    RateLimitExceeded { user_id: String, ip: Option<IpAddr>, limit_type: String },
     SuspiciousActivity { user_id: Option<String>, ip: Option<IpAddr>, description: String },
-    PermissionDenied { user_id: String, action: String },
-    InvalidInput { user_id: Option<String>, input_type: String },
+    
+    // Input validation and attacks
+    InvalidInput { user_id: Option<String>, input_type: String, details: String },
+    XSSAttempt { user_id: Option<String>, ip: Option<IpAddr>, content: String },
+    CSRFAttempt { user_id: Option<String>, ip: Option<IpAddr>, origin: String },
+    UnicodeAttack { user_id: Option<String>, ip: Option<IpAddr>, attack_type: String },
+    
+    // Connection and network security
     ConnectionBlocked { ip: IpAddr, reason: String },
+    SuspiciousOrigin { ip: Option<IpAddr>, origin: String, reason: String },
+    TLSError { ip: Option<IpAddr>, error: String },
+    
+    // System security
+    ConfigurationError { component: String, error: String },
+    SecurityPolicyViolation { user_id: Option<String>, policy: String, violation: String },
+    ProductionModeWarning { component: String, warning: String },
 }
 
 /// Security event with timestamp
@@ -36,10 +59,31 @@ impl SecurityLogger {
     /// Create a new security logger
     pub fn new() -> Self {
         let mut alert_thresholds = HashMap::new();
+        // Authentication
         alert_thresholds.insert("auth_failed".to_string(), 5);
-        alert_thresholds.insert("rate_limit".to_string(), 10);
+        alert_thresholds.insert("token_validation_failed".to_string(), 10);
+        
+        // Authorization
         alert_thresholds.insert("permission_denied".to_string(), 20);
+        alert_thresholds.insert("unauthorized_access".to_string(), 5);
+        
+        // Rate limiting and abuse
+        alert_thresholds.insert("rate_limit".to_string(), 10);
         alert_thresholds.insert("suspicious_activity".to_string(), 3);
+        
+        // Attack attempts
+        alert_thresholds.insert("xss_attempt".to_string(), 1);
+        alert_thresholds.insert("csrf_attempt".to_string(), 1);
+        alert_thresholds.insert("unicode_attack".to_string(), 1);
+        
+        // Network security
+        alert_thresholds.insert("connection_blocked".to_string(), 15);
+        alert_thresholds.insert("suspicious_origin".to_string(), 5);
+        alert_thresholds.insert("tls_error".to_string(), 10);
+        
+        // System security
+        alert_thresholds.insert("config_error".to_string(), 1);
+        alert_thresholds.insert("security_policy_violation".to_string(), 1);
         
         Self {
             events: Arc::new(RwLock::new(Vec::new())),
@@ -86,23 +130,70 @@ impl SecurityLogger {
         
         // Log the event
         match event {
-            SecurityEvent::AuthenticationFailed { user_id, ip } => {
-                log::warn!("Authentication failed - User: {:?}, IP: {:?}", user_id, ip);
+            // Authentication events
+            SecurityEvent::AuthenticationFailed { user_id, ip, reason } => {
+                log::warn!("SECURITY: Authentication failed - User: {:?}, IP: {:?}, Reason: {}", user_id, ip, reason);
             }
-            SecurityEvent::RateLimitExceeded { user_id, ip } => {
-                log::warn!("Rate limit exceeded - User: {}, IP: {:?}", user_id, ip);
+            SecurityEvent::AuthenticationSuccess { user_id, ip } => {
+                log::info!("SECURITY: Authentication success - User: {}, IP: {:?}", user_id, ip);
+            }
+            SecurityEvent::TokenRevoked { user_id, token_id, reason } => {
+                log::warn!("SECURITY: Token revoked - User: {}, Token: {}, Reason: {}", user_id, token_id, reason);
+            }
+            SecurityEvent::TokenValidationFailed { token_id, ip, reason } => {
+                log::warn!("SECURITY: Token validation failed - Token: {:?}, IP: {:?}, Reason: {}", token_id, ip, reason);
+            }
+            
+            // Authorization events
+            SecurityEvent::PermissionDenied { user_id, action, resource } => {
+                log::warn!("SECURITY: Permission denied - User: {}, Action: {}, Resource: {:?}", user_id, action, resource);
+            }
+            SecurityEvent::UnauthorizedAccess { user_id, ip, resource } => {
+                log::error!("SECURITY: Unauthorized access attempt - User: {:?}, IP: {:?}, Resource: {}", user_id, ip, resource);
+            }
+            
+            // Rate limiting and abuse
+            SecurityEvent::RateLimitExceeded { user_id, ip, limit_type } => {
+                log::warn!("SECURITY: Rate limit exceeded - User: {}, IP: {:?}, Type: {}", user_id, ip, limit_type);
             }
             SecurityEvent::SuspiciousActivity { user_id, ip, description } => {
-                log::warn!("Suspicious activity - User: {:?}, IP: {:?}, Description: {}", user_id, ip, description);
+                log::error!("SECURITY: Suspicious activity - User: {:?}, IP: {:?}, Description: {}", user_id, ip, description);
             }
-            SecurityEvent::PermissionDenied { user_id, action } => {
-                log::info!("Permission denied - User: {}, Action: {}", user_id, action);
+            
+            // Attack attempts
+            SecurityEvent::InvalidInput { user_id, input_type, details } => {
+                log::warn!("SECURITY: Invalid input - User: {:?}, Type: {}, Details: {}", user_id, input_type, details);
             }
-            SecurityEvent::InvalidInput { user_id, input_type } => {
-                log::info!("Invalid input - User: {:?}, Type: {}", user_id, input_type);
+            SecurityEvent::XSSAttempt { user_id, ip, content } => {
+                log::error!("SECURITY: XSS attempt detected - User: {:?}, IP: {:?}, Content: {}", user_id, ip, content);
             }
+            SecurityEvent::CSRFAttempt { user_id, ip, origin } => {
+                log::error!("SECURITY: CSRF attempt detected - User: {:?}, IP: {:?}, Origin: {}", user_id, ip, origin);
+            }
+            SecurityEvent::UnicodeAttack { user_id, ip, attack_type } => {
+                log::error!("SECURITY: Unicode attack detected - User: {:?}, IP: {:?}, Type: {}", user_id, ip, attack_type);
+            }
+            
+            // Network security
             SecurityEvent::ConnectionBlocked { ip, reason } => {
-                log::warn!("Connection blocked - IP: {}, Reason: {}", ip, reason);
+                log::warn!("SECURITY: Connection blocked - IP: {}, Reason: {}", ip, reason);
+            }
+            SecurityEvent::SuspiciousOrigin { ip, origin, reason } => {
+                log::warn!("SECURITY: Suspicious origin - IP: {:?}, Origin: {}, Reason: {}", ip, origin, reason);
+            }
+            SecurityEvent::TLSError { ip, error } => {
+                log::error!("SECURITY: TLS error - IP: {:?}, Error: {}", ip, error);
+            }
+            
+            // System security
+            SecurityEvent::ConfigurationError { component, error } => {
+                log::error!("SECURITY: Configuration error - Component: {}, Error: {}", component, error);
+            }
+            SecurityEvent::SecurityPolicyViolation { user_id, policy, violation } => {
+                log::error!("SECURITY: Policy violation - User: {:?}, Policy: {}, Violation: {}", user_id, policy, violation);
+            }
+            SecurityEvent::ProductionModeWarning { component, warning } => {
+                log::warn!("SECURITY: Production mode warning - Component: {}, Warning: {}", component, warning);
             }
         }
     }
@@ -110,12 +201,35 @@ impl SecurityLogger {
     /// Get event key for tracking
     fn get_event_key(&self, event: &SecurityEvent) -> String {
         match event {
+            // Authentication events
             SecurityEvent::AuthenticationFailed { .. } => "auth_failed".to_string(),
+            SecurityEvent::AuthenticationSuccess { .. } => "auth_success".to_string(),
+            SecurityEvent::TokenRevoked { .. } => "token_revoked".to_string(),
+            SecurityEvent::TokenValidationFailed { .. } => "token_validation_failed".to_string(),
+            
+            // Authorization events
+            SecurityEvent::PermissionDenied { .. } => "permission_denied".to_string(),
+            SecurityEvent::UnauthorizedAccess { .. } => "unauthorized_access".to_string(),
+            
+            // Rate limiting and abuse
             SecurityEvent::RateLimitExceeded { .. } => "rate_limit".to_string(),
             SecurityEvent::SuspiciousActivity { .. } => "suspicious_activity".to_string(),
-            SecurityEvent::PermissionDenied { .. } => "permission_denied".to_string(),
+            
+            // Attack attempts
             SecurityEvent::InvalidInput { .. } => "invalid_input".to_string(),
+            SecurityEvent::XSSAttempt { .. } => "xss_attempt".to_string(),
+            SecurityEvent::CSRFAttempt { .. } => "csrf_attempt".to_string(),
+            SecurityEvent::UnicodeAttack { .. } => "unicode_attack".to_string(),
+            
+            // Network security
             SecurityEvent::ConnectionBlocked { .. } => "connection_blocked".to_string(),
+            SecurityEvent::SuspiciousOrigin { .. } => "suspicious_origin".to_string(),
+            SecurityEvent::TLSError { .. } => "tls_error".to_string(),
+            
+            // System security
+            SecurityEvent::ConfigurationError { .. } => "config_error".to_string(),
+            SecurityEvent::SecurityPolicyViolation { .. } => "security_policy_violation".to_string(),
+            SecurityEvent::ProductionModeWarning { .. } => "production_warning".to_string(),
         }
     }
     
@@ -124,11 +238,8 @@ impl SecurityLogger {
         log::error!("SECURITY ALERT: {} events of type '{}' detected", count, event_type);
         log::error!("Sample event: {:?}", sample_event);
         
-        // In a real system, this would trigger additional actions:
-        // - Send email/SMS alerts
-        // - Notify monitoring systems
-        // - Trigger automatic defensive measures
-        // - Log to SIEM system
+        // Additional alerting actions can be implemented here:
+        // Email/SMS notifications, SIEM integration, automated responses
     }
     
     /// Get recent security events
@@ -169,25 +280,21 @@ impl SecurityLogger {
     }
 }
 
-/// Global security logger instance
-static mut SECURITY_LOGGER: Option<Arc<SecurityLogger>> = None;
-static INIT: std::sync::Once = std::sync::Once::new();
+/// Global security logger instance - thread-safe singleton
+static SECURITY_LOGGER: OnceLock<Arc<SecurityLogger>> = OnceLock::new();
 
 /// Initialize the global security logger
 pub fn init_security_logger() {
-    INIT.call_once(|| {
+    SECURITY_LOGGER.get_or_init(|| {
         let logger = Arc::new(SecurityLogger::new());
         logger.clone().start_cleanup_task();
-        
-        unsafe {
-            SECURITY_LOGGER = Some(logger);
-        }
+        logger
     });
 }
 
 /// Get the global security logger
 pub fn get_security_logger() -> Option<Arc<SecurityLogger>> {
-    unsafe { SECURITY_LOGGER.clone() }
+    SECURITY_LOGGER.get().cloned()
 }
 
 /// Log a security event using the global logger
