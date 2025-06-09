@@ -42,33 +42,34 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        // SECURITY: Default implementation should not be used for production
-        // Always use ServerConfig::from_env() to ensure proper JWT secret configuration
-        log::warn!("Using default ServerConfig - this should only be used for testing!");
-        
+        panic!("ServerConfig::default() is not allowed for security reasons. Use ServerConfig::from_env() instead.");
+    }
+}
+
+impl ServerConfig {
+    /// Create a test configuration - DANGEROUS: Only for testing!
+    #[cfg(test)]
+    pub fn for_testing() -> Self {
         Self {
             host: DEFAULT_HOST.to_string(),
             port: DEFAULT_PORT,
-            max_connections: 100, // Default maximum number of simultaneous connections
-            buffer_size: 1024,    // Default buffer size for messages
-            connection_timeout: Duration::from_secs(60), // 1 minute timeout
-            ping_interval: Duration::from_secs(30), // 30 seconds ping interval
-            thread_pool_size: DEFAULT_THREAD_POOL_SIZE, // Default worker threads count
-            max_queued_tasks: DEFAULT_MAX_QUEUED_TASKS, // Default maximum queued tasks
-            jwt_secret: "INSECURE-DEFAULT-FOR-TESTING-ONLY".to_string(), // SECURITY: Obvious insecure default
-            csrf_secret: "INSECURE-CSRF-DEFAULT-FOR-TESTING-ONLY".to_string(), // SECURITY: Obvious insecure default
-            max_connections_per_ip: 10,     // Default 10 connections per IP
-            rate_limit_messages_per_minute: 60, // Default 60 messages per minute
-            allow_anonymous_access: false,   // SECURITY: Default to requiring authentication
-            development_mode: false,         // SECURITY: Default to production mode
+            max_connections: 100,
+            buffer_size: 1024,
+            connection_timeout: Duration::from_secs(60),
+            ping_interval: Duration::from_secs(30),
+            thread_pool_size: DEFAULT_THREAD_POOL_SIZE,
+            max_queued_tasks: DEFAULT_MAX_QUEUED_TASKS,
+            jwt_secret: "test-jwt-secret-only-for-unit-tests-never-use-in-production".to_string(),
+            csrf_secret: "test-csrf-secret-only-for-unit-tests-never-use-in-production".to_string(),
+            max_connections_per_ip: 10,
+            rate_limit_messages_per_minute: 60,
+            allow_anonymous_access: false,
+            development_mode: true,
             tls_cert_path: None,
             tls_key_path: None,
             enable_tls: false,
         }
     }
-}
-
-impl ServerConfig {
     
     /// Validate that a secret meets security requirements
     fn validate_secret(secret: &str, secret_type: &str) -> Result<()> {
@@ -259,5 +260,37 @@ impl ServerConfig {
             tls_cert_path,
             tls_key_path,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    #[should_panic(expected = "ServerConfig::default() is not allowed for security reasons")]
+    fn test_default_panics() {
+        let _ = ServerConfig::default();
+    }
+    
+    #[test]
+    fn test_for_testing_works_in_tests() {
+        let config = ServerConfig::for_testing();
+        assert!(config.jwt_secret.contains("test"));
+        assert!(config.csrf_secret.contains("test"));
+        assert!(config.development_mode);
+    }
+    
+    #[test]
+    fn test_from_env_requires_secrets() {
+        // Clear any existing env vars
+        env::remove_var("RUSTY_SOCKS_JWT_SECRET");
+        env::remove_var("JWT_SECRET");
+        env::remove_var("RUSTY_SOCKS_CSRF_SECRET");
+        env::remove_var("CSRF_SECRET");
+        
+        let result = ServerConfig::from_env();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("JWT_SECRET"));
     }
 }

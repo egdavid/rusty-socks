@@ -1,22 +1,71 @@
-name: Rust
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "develop" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "develop" ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  test:
+    name: Test Suite
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        rust: [stable, beta]
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust }}
+    - uses: Swatinem/rust-cache@v2
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libssl-dev
     - name: Run tests
       run: cargo test --verbose
+      env:
+        RUSTY_SOCKS_JWT_SECRET: test-jwt-secret-only-for-ci-32-characters-long
+        RUSTY_SOCKS_CSRF_SECRET: test-csrf-secret-only-for-ci-32-characters
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+    - name: Run security audit
+      run: cargo audit
+
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libssl-dev
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+      env:
+        RUSTY_SOCKS_JWT_SECRET: test-jwt-secret-only-for-ci-32-characters-long
+        RUSTY_SOCKS_CSRF_SECRET: test-csrf-secret-only-for-ci-32-characters

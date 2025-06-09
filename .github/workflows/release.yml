@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: rusty-socks
+            asset_name: rusty-socks-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: rusty-socks.exe
+            asset_name: rusty-socks-windows-x86_64.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: rusty-socks
+            asset_name: rusty-socks-macos-x86_64
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - uses: Swatinem/rust-cache@v2
+    
+    - name: Install dependencies (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: sudo apt-get update && sudo apt-get install -y libssl-dev
+    
+    - name: Build
+      run: cargo build --release --target ${{ matrix.target }}
+      env:
+        RUSTY_SOCKS_JWT_SECRET: build-time-secret-not-used-in-runtime-32chars
+        RUSTY_SOCKS_CSRF_SECRET: build-time-csrf-secret-not-used-runtime-32
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.asset_name }}
+        path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          rusty-socks-linux-x86_64/rusty-socks
+          rusty-socks-windows-x86_64.exe/rusty-socks.exe
+          rusty-socks-macos-x86_64/rusty-socks
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

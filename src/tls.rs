@@ -101,17 +101,75 @@ impl TlsConfigBuilder {
     }
 
     /// Validate that certificate and private key match
-    fn validate_cert_key_pair(cert_chain: &Vec<Certificate>, _private_key: &PrivateKey) -> Result<()> {
+    fn validate_cert_key_pair(cert_chain: &Vec<Certificate>, private_key: &PrivateKey) -> Result<()> {
         if cert_chain.is_empty() {
             return Err(RustySocksError::ConfigError(
                 "Certificate chain is empty".to_string()
             ));
         }
 
-        // Basic validation - ensure we have at least one certificate
+        // Validate certificate chain
         log::debug!("Certificate chain contains {} certificates", cert_chain.len());
         
-        Ok(())
+        // Get the leaf certificate (first in chain)
+        let leaf_cert = &cert_chain[0];
+        
+        // Parse the certificate to extract public key
+        use x509_parser::prelude::*;
+        let (_, cert) = X509Certificate::from_der(&leaf_cert.0)
+            .map_err(|e| RustySocksError::ConfigError(
+                format!("Failed to parse certificate: {:?}", e)
+            ))?;
+        
+        // Verify certificate is not expired
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+            
+        let not_before = cert.validity().not_before.timestamp();
+        let not_after = cert.validity().not_after.timestamp();
+        
+        if now < not_before {
+            return Err(RustySocksError::ConfigError(
+                format!("Certificate is not yet valid. Valid from: {}", cert.validity().not_before)
+            ));
+        }
+        
+        if now > not_after {
+            return Err(RustySocksError::ConfigError(
+                format!("Certificate has expired. Expired on: {}", cert.validity().not_after)
+            ));
+        }
+        
+        // Create a temporary server config to test the cert/key pair
+        // This will fail if they don't match
+        let test_config = RustlsServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain.clone(), private_key.clone());
+            
+        match test_config {
+            Ok(_) => {
+                log::info!("Certificate and private key validation successful");
+                log::info!("Certificate subject: {}", cert.subject());
+                log::info!("Certificate issuer: {}", cert.issuer());
+                log::info!("Certificate valid until: {}", cert.validity().not_after);
+                
+                // Warn if certificate expires soon (30 days)
+                let days_until_expiry = (not_after - now) / 86400;
+                if days_until_expiry < 30 {
+                    log::warn!("Certificate expires in {} days!", days_until_expiry);
+                }
+                
+                Ok(())
+            }
+            Err(e) => {
+                Err(RustySocksError::ConfigError(
+                    format!("Certificate and private key do not match: {}", e)
+                ))
+            }
+        }
     }
 
     /// Log TLS security information
@@ -146,7 +204,7 @@ pub fn generate_self_signed_cert(domain: &str, cert_path: &str, key_path: &str) 
 /// Validate TLS configuration security
 pub fn validate_tls_security(_config: &RustlsServerConfig) -> Result<()> {
     // This is a placeholder for more sophisticated security validation
-    // In a production environment, you might want to:
+    // TODO:
     // - Check cipher suite strength
     // - Validate protocol versions
     // - Check certificate chain completeness
