@@ -12,8 +12,8 @@ build-dir = "book"
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/yourusername/rusty-socks"
-edit-url-template = "https://github.com/yourusername/rusty-socks/edit/main/docs/{path}"
+git-repository-url = "https://github.com/egdavid/rusty-socks"
+edit-url-template = "https://github.com/egdavid/rusty-socks/edit/main/docs/{path}"
 site-url = "https://rustysocks.io/"
 cname = "rustysocks.io"
 

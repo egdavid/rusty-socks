@@ -122,6 +122,4 @@ impl User {
     }
 }
 
-// TODO: Implement user persistence (database storage)
-// TODO: Add password hashing for authentication
-// TODO: Add OAuth provider support (Google, GitHub, etc.)
+// User persistence, password hashing, and OAuth provider support can be added in future versions

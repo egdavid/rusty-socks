@@ -190,9 +190,9 @@ impl UnicodeSecurityValidator {
     /// Check if text contains valid Unicode sequences
     fn is_valid_unicode(&self, text: &str) -> bool {
         // Rust strings are guaranteed to be valid UTF-8, but we can check for:
-        // 1. Overlong encodings (already handled by Rust)
-        // 2. Surrogate pairs (invalid in UTF-8)
-        // 3. Non-characters
+        // - Overlong encodings (already handled by Rust)
+        // - Surrogate pairs (invalid in UTF-8)
+        // - Non-characters
         
         for ch in text.chars() {
             // Check for Unicode non-characters

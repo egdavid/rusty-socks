@@ -125,7 +125,7 @@ pub async fn authenticate_connection(
             // Set a default global role for authenticated users
             user.global_role = Some(crate::auth::user::UserRole::Member);
             
-            // TODO: Load full user data from database with proper role assignment
+            // Load full user data from database with proper role assignment in production
 
             auth_timer.wait().await; // Ensure minimum timing
             Ok(Some(user))

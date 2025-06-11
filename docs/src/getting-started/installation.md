@@ -23,7 +23,7 @@ cargo install rusty-socks
 For the latest features or custom modifications:
 
 ```bash
-git clone https://github.com/yourusername/rusty-socks.git
+git clone https://github.com/egdavid/rusty-socks.git
 cd rusty-socks
 cargo build --release
 ```

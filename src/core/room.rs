@@ -647,6 +647,5 @@ mod tests {
     }
 }
 
-// TODO: Add room persistence to survive server restarts
-// TODO: Add room metadata (description, tags, etc.)
+// Room persistence and metadata features could be added in future versions
 // NOTE: Room permissions and moderators system implemented with role-based access control
