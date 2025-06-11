@@ -8,11 +8,8 @@ title = "RustySocks Documentation"
 [build]
 build-dir = "book"
 
-[preprocessor.mermaid]
-command = "mdbook-mermaid"
 
 [output.html]
-theme = "rust"
 default-theme = "rust"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/yourusername/rusty-socks"
