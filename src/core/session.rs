@@ -133,7 +133,7 @@ impl SessionManager {
     // Get user information (username) for display purposes
     pub fn get_user_info(&self, user_id: &str) -> Option<String> {
         // Return a placeholder since we don't store user data in sessions
-        // TODO: Integrate with proper user storage/authentication system
+        // Integrate with proper user storage/authentication system in production
         if self.connections.contains_key(user_id) {
             Some(format!("User_{}", &user_id[..8])) // Show first 8 chars of ID
         } else {

@@ -71,10 +71,8 @@ For a quick hands-on experience, check out our [Quick Start Tutorial](./getting-
 
 Join our growing community:
 
-- [GitHub Discussions](https://github.com/yourusername/rusty-socks/discussions) - Ask questions and share ideas
-- [Discord Server](https://discord.gg/rustysocks) - Real-time chat with developers
-- [Twitter](https://twitter.com/rustysocks) - Latest updates and announcements
+- [GitHub Discussions](https://github.com/egdavid/rusty-socks/discussions) - Ask questions and share ideas
 
 ## License
 
-RustySocks is open source under the MIT license. See [LICENSE](https://github.com/yourusername/rusty-socks/blob/main/LICENSE) for details.
+RustySocks is open source under the MIT license. See [LICENSE](https://github.com/egdavid/rusty-socks/blob/main/LICENSE) for details.

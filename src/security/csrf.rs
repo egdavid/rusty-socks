@@ -3,10 +3,10 @@
 //! This module provides comprehensive CSRF protection for WebSocket connections
 //! and HTTP endpoints. It implements multiple layers of protection:
 //! 
-//! 1. Origin header validation
-//! 2. CSRF token validation
-//! 3. Referer header checking
-//! 4. SameSite cookie enforcement
+//! - Origin header validation
+//! - CSRF token validation
+//! - Referer header checking
+//! - SameSite cookie enforcement
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};

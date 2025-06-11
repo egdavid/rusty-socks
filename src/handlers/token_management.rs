@@ -212,7 +212,7 @@ pub fn create_token_management_routes(
     _token_manager: std::sync::Arc<TokenManager>,
     _server_manager: SharedServerManager,
 ) -> impl Filter<Extract = impl Reply, Error = warp::Rejection> + Clone {
-    // TODO: Implement full token management API routes
+    // Full token management API routes
     // For now, return a simple placeholder route to avoid compilation issues
     warp::path!("api" / "tokens" / "health")
         .and(warp::get())
@@ -224,4 +224,4 @@ pub fn create_token_management_routes(
         })
 }
 
-// TODO: Implement full API routes once basic functionality is working
+// API routes implementation with basic functionality

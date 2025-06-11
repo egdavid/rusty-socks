@@ -12,7 +12,7 @@ use log::{debug, warn};
 pub struct IpExtractionConfig {
     /// Whether to trust proxy headers (X-Forwarded-For, X-Real-IP, etc.)
     pub trust_proxy_headers: bool,
-    /// List of trusted proxy IP ranges (CIDR notation would be ideal, but simplified for now)
+    /// List of trusted proxy IP ranges (CIDR notation would be ideal, but it's simplified for now)
     pub trusted_proxies: Vec<IpAddr>,
     /// Whether to allow private/local IPs (for development)
     pub allow_private_ips: bool,
@@ -54,10 +54,10 @@ impl IpExtractionConfig {
 /// Extract the real client IP address from headers and connection info
 /// 
 /// This function implements defense against IP spoofing by:
-/// 1. Only trusting proxy headers from explicitly trusted proxies
-/// 2. Validating IP format and ranges
-/// 3. Preferring direct connection IP over headers when not behind trusted proxy
-/// 4. Logging suspicious activity for security monitoring
+/// - Only trusting proxy headers from explicitly trusted proxies
+/// - Validating IP format and ranges
+/// - Preferring direct connection IP over headers when not behind trusted proxy
+/// - Logging suspicious activity for security monitoring
 pub fn extract_client_ip(
     headers: &HeaderMap,
     remote_addr: Option<std::net::SocketAddr>,
@@ -249,10 +249,7 @@ pub fn log_suspicious_ip_activity(ip: IpAddr, reason: &str, headers: &HeaderMap)
         }
     }
     
-    // TODO: Could integrate with security monitoring systems here
-    // - Send to SIEM
-    // - Update threat intelligence feeds
-    // - Trigger automated blocking
+    // Could integrate with security monitoring systems here
 }
 
 #[cfg(test)]

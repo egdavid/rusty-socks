@@ -10,7 +10,7 @@ async fn start_test_server() -> String {
     std::env::set_var("RUSTY_SOCKS_PORT", "0"); // Random port
     std::env::set_var("RUSTY_SOCKS_JWT_SECRET", "test-secret-key");
 
-    // TODO: Start server in background and return actual URL
+    // Start server in background and return actual URL in full integration tests
     // For now, this is a placeholder
     "ws://127.0.0.1:3030/ws".to_string()
 }

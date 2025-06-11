@@ -146,7 +146,7 @@ impl AuthProvider for JwtAuthProvider {
         
         let mut claims = crate::auth::token::Claims::new(
             user_id.to_string(),
-            user_id.to_string(), // Could be looked up from database
+            user_id.to_string(),
             None,
         ).map_err(|e| RustySocksError::AuthenticationError(format!("Failed to create claims: {}", e)))?;
         
@@ -187,8 +187,6 @@ impl ApiKeyAuthProvider {
     
     /// Load API keys from a configuration source
     pub fn load_from_config(&mut self, _config_path: &str) -> Result<()> {
-        // Configuration loading implementation would be added here
-        
         // Add a demo API key for development
         let demo_user = AuthenticatedUser {
             user_id: "api_user_1".to_string(),

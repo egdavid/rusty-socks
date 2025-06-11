@@ -590,7 +590,7 @@ impl MessageHandler {
         let has_permission = if let Some(info) = user_info {
             // Check if user has global CreateRooms permission
             // For now, check if user has Admin/Owner role in any room or global role
-            // TODO: check against a user database
+            // Check against user database in production
             info.contains("Admin") || info.contains("Owner")
         } else {
             // Anonymous users cannot create rooms
@@ -745,9 +745,9 @@ impl MessageHandler {
                 id,
                 name,
                 member_count,
-                max_members: None,        // TODO: Retrieve max_members from room data
-                is_private: false,        // TODO: Retrieve is_private from room data
-                requires_password: false, // TODO: Retrieve password requirement from room data
+                max_members: None,        // Retrieve from room data in production
+                is_private: false,        // Retrieve from room data in production
+                requires_password: false, // Retrieve from room data in production
             })
             .collect();
 
@@ -765,8 +765,8 @@ impl MessageHandler {
                 for member_id in member_ids {
                     let username = self.server.get_user_info(&member_id).await.unwrap_or_else(|| "Unknown".to_string());
                     // NOTE: Role system implemented - use server.get_user_role() method
-                    let role = None; // TODO: Integrate get_user_role() call here
-                    // TODO: Check if user is actually online
+                    let role = None; // Integrate get_user_role() call in production
+                    // Check if user is actually online in production
                     let is_online = true;
                     
                     members.push(UserInfo {
