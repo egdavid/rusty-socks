@@ -32,7 +32,7 @@ url = "=2.5.4"
 sha2 = "=0.10.9"
 tokio-rustls = "=0.24.1"
 rustls = "=0.21.12"
-rustls-pemfile = "=1.0.4"
+rustls-pemfile = "=2.2.0"
 x509-parser = "=0.16.0"
 ring = "=0.17.8"
 

@@ -1469,7 +1469,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls 0.21.12",
- "rustls-pemfile 1.0.4",
+ "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
  "sha2",
