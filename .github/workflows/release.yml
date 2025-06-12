@@ -61,7 +61,7 @@ jobs:
       uses: actions/download-artifact@v3
     
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           rusty-socks-linux-x86_64/rusty-socks
