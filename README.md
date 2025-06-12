@@ -1,5 +1,11 @@
 # Rusty Socks
 
+[![CI](https://github.com/egdavid/rusty-socks/workflows/CI/badge.svg)](https://github.com/egdavid/rusty-socks/actions)
+[![Crates.io](https://img.shields.io/crates/v/rusty-socks.svg)](https://crates.io/crates/rusty-socks)
+[![Documentation](https://docs.rs/rusty-socks/badge.svg)](https://docs.rs/rusty-socks)
+[![License](https://img.shields.io/crates/l/rusty-socks.svg)](https://github.com/egdavid/rusty-socks/blob/main/LICENSE)
+[![Downloads](https://img.shields.io/crates/d/rusty-socks.svg)](https://crates.io/crates/rusty-socks)
+
 A high-performance, production-ready WebSocket server written in Rust, designed for real-time applications across gaming, finance, chat, and other domains requiring fast, secure communication.
 
 ## Features

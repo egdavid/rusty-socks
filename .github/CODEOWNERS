@@ -1,0 +1,24 @@
+# Code ownership and review assignment for Rusty Socks
+
+* @egdavid
+
+/src/core/ @egdavid
+/src/lib.rs @egdavid
+/src/bin/ @egdavid
+
+/src/security/ @egdavid
+/src/auth/ @egdavid
+/src/tls.rs @egdavid
+/tests/security/ @egdavid
+
+/deploy/ @egdavid
+/config/ @egdavid
+/.github/workflows/ @egdavid
+/scripts/ @egdavid
+
+/docs/ @egdavid
+/README.md @egdavid
+/SECURITY.md @egdavid
+
+/Cargo.toml @egdavid
+/Cargo.lock @egdavid
