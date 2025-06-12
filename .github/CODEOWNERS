@@ -1,31 +1,24 @@
 # Code ownership and review assignment for Rusty Socks
-# Each line specifies who needs to review changes to specific files/folders
 
-# Default owner for everything
 * @egdavid
 
-# Core functionality and architecture
-/src/core/ @egdavid @rusty-socks/core-team
-/src/lib.rs @egdavid @rusty-socks/core-team
-/src/bin/ @egdavid @rusty-socks/core-team
+/src/core/ @egdavid
+/src/lib.rs @egdavid
+/src/bin/ @egdavid
 
-# Security components require security team review
-/src/security/ @egdavid @rusty-socks/security-team
-/src/auth/ @egdavid @rusty-socks/security-team
-/src/tls.rs @egdavid @rusty-socks/security-team
-/tests/security/ @rusty-socks/security-team
+/src/security/ @egdavid
+/src/auth/ @egdavid
+/src/tls.rs @egdavid
+/tests/security/ @egdavid
 
-# Infrastructure and deployment configs
-/deploy/ @rusty-socks/devops-team
-/config/ @rusty-socks/devops-team
-/.github/workflows/ @egdavid @rusty-socks/devops-team
-/scripts/ @rusty-socks/devops-team
+/deploy/ @egdavid
+/config/ @egdavid
+/.github/workflows/ @egdavid
+/scripts/ @egdavid
 
-# Documentation changes
-/docs/ @rusty-socks/docs-team
+/docs/ @egdavid
 /README.md @egdavid
-/SECURITY.md @egdavid @rusty-socks/security-team
+/SECURITY.md @egdavid
 
-# Critical configuration files
 /Cargo.toml @egdavid
 /Cargo.lock @egdavid
