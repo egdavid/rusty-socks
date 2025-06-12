@@ -45,7 +45,7 @@ jobs:
         RUSTY_SOCKS_CSRF_SECRET: build-time-csrf-secret-not-used-runtime-32
     
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset_name }}
         path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
