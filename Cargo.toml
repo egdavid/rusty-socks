@@ -34,7 +34,7 @@ tokio-rustls = "=0.24.1"
 rustls = "=0.21.12"
 rustls-pemfile = "=1.0.4"
 x509-parser = "=0.16.0"
-ring = "=0.17.8"
+ring = "=0.17.13"
 
 # SECURITY: Dev dependencies also pinned for reproducible test environments
 [dev-dependencies]
