@@ -1,0 +1,107 @@
+name: "CodeQL Advanced"
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+  schedule:
+    - cron: '33 14 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # Analyze GitHub Actions
+        - language: actions
+          build-mode: none
+        # Analyze Python scripts if any
+        - language: python
+          build-mode: none
+        # Analyze JavaScript/TypeScript in docs or examples
+        - language: javascript-typescript
+          build-mode: none
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+        queries: security-extended,security-and-quality
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{matrix.language}}"
+
+  # Separate job for Rust security analysis
+  rust-security:
+    name: Rust Security Audit
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+    
+    - name: Run cargo audit
+      run: cargo audit --json | tee audit-results.json
+      continue-on-error: true
+    
+    - name: Upload audit results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: cargo-audit-results
+        path: audit-results.json
+    
+    # Additional Rust security checks
+    - name: Install cargo-deny
+      run: cargo install cargo-deny
+    
+    - name: Check dependencies
+      run: cargo deny check
+      continue-on-error: true
+
+  # Clippy analysis for Rust code quality
+  clippy-analysis:
+    name: Clippy Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    
+    - name: Run Clippy
+      run: cargo clippy --all-features --all-targets -- -D warnings
+      continue-on-error: true
