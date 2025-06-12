@@ -3,7 +3,9 @@ name = "rusty_socks"
 version = "0.1.0"
 edition = "2021"
 authors = ["David EUGENE - egdavid@GitHub"]
-description = "Lightweight WebSocket server written in Rust"
+description = "High-performance WebSocket server written in Rust"
+homepage = "https://rustysocks.io"
+repository = "https://github.com/egdavid/rusty-socks"
 readme = "README.md"
 license = "MIT"
 
