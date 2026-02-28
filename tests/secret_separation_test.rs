@@ -1,10 +1,17 @@
 //! Tests for JWT and CSRF secret separation
+//!
+//! These tests modify process-wide env vars; a lock ensures they run serially
+//! and do not interfere with each other.
 
 use rusty_socks::config::ServerConfig;
 use std::env;
+use std::sync::Mutex;
+
+static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_separate_secrets_validation() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap();
     // Save original environment
     let original_jwt = env::var("RUSTY_SOCKS_JWT_SECRET").ok();
     let original_csrf = env::var("RUSTY_SOCKS_CSRF_SECRET").ok();
@@ -35,6 +42,7 @@ fn test_separate_secrets_validation() {
 
 #[test]
 fn test_same_secrets_rejected() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap();
     // Test that same secrets are rejected
     let same_key = "same_key_used_for_both_purposes_32_chars_xyz";
     env::set_var("RUSTY_SOCKS_JWT_SECRET", same_key);
@@ -54,6 +62,7 @@ fn test_same_secrets_rejected() {
 
 #[test]
 fn test_insecure_patterns_rejected() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap();
     // Test that insecure patterns are rejected for both secrets
     let insecure_patterns = [
         "INSECURE-DEFAULT-FOR-TESTING-ONLY",
@@ -77,6 +86,7 @@ fn test_insecure_patterns_rejected() {
 
 #[test]
 fn test_short_secrets_rejected() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap();
     // Test that secrets shorter than 32 characters are rejected
     env::set_var("RUSTY_SOCKS_JWT_SECRET", "short"); // Only 5 characters
     env::set_var("RUSTY_SOCKS_CSRF_SECRET", "different_but_secure_32_character_long_key");
@@ -97,6 +107,7 @@ fn test_short_secrets_rejected() {
 
 #[test]
 fn test_missing_csrf_secret_error() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap();
     // Test that missing CSRF secret is reported with helpful error
     env::set_var("RUSTY_SOCKS_JWT_SECRET", "secure_jwt_key_with_32_characters_minimum_abc");
     env::remove_var("RUSTY_SOCKS_CSRF_SECRET");

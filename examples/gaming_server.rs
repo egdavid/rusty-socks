@@ -58,6 +58,7 @@ struct GameSession {
     started_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     
