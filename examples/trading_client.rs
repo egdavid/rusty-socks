@@ -6,9 +6,9 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 struct Portfolio {
@@ -92,13 +92,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("✅ Connected to trading server");
         
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+        
+        // Spawn task to forward channel messages to the WebSocket
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if ws_sender.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
         
         // Join trading floor room
         let join_msg = json!({
             "type": "join_room",
             "room_id": "trading_floor"
         });
-        ws_sender.send(Message::Text(join_msg.to_string())).await?;
+        let _ = tx.send(Message::Text(join_msg.to_string()));
         
         // Subscribe to market data for all symbols
         for symbol in &symbols {
@@ -106,20 +116,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "type": "subscribe_ticker",
                 "symbol": symbol
             });
-            ws_sender.send(Message::Text(subscribe_msg.to_string())).await?;
+            let _ = tx.send(Message::Text(subscribe_msg.to_string()));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         
         // Start market data simulation
-        let sender_clone = ws_sender.clone();
+        let tx_market = tx.clone();
         tokio::spawn(async move {
-            simulate_market_data(sender_clone, symbols).await;
+            simulate_market_data(tx_market, symbols).await;
         });
         
         // Start trading strategy
-        let sender_clone2 = ws_sender.clone();
+        let tx_strategy = tx.clone();
         tokio::spawn(async move {
-            simple_trading_strategy(sender_clone2).await;
+            simple_trading_strategy(tx_strategy).await;
         });
         
         // Handle incoming messages
@@ -155,8 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn simulate_market_data(
-    mut ws_sender: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>,
-    symbols: Vec<&str>
+    tx: mpsc::UnboundedSender<Message>,
+    symbols: Vec<&str>,
 ) {
     let mut interval = interval(Duration::from_secs(2));
     let mut prices: HashMap<String, f64> = HashMap::new();
@@ -193,15 +203,13 @@ async fn simulate_market_data(
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 });
                 
-                let _ = ws_sender.send(Message::Text(market_update.to_string())).await;
+                let _ = tx.send(Message::Text(market_update.to_string()));
             }
         }
     }
 }
 
-async fn simple_trading_strategy(
-    mut ws_sender: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>
-) {
+async fn simple_trading_strategy(tx: mpsc::UnboundedSender<Message>) {
     let mut interval = interval(Duration::from_secs(10));
     
     let strategies = vec![
@@ -227,7 +235,7 @@ async fn simple_trading_strategy(
                 "order_type": "limit"
             });
             
-            let _ = ws_sender.send(Message::Text(order_msg.to_string())).await;
+            let _ = tx.send(Message::Text(order_msg.to_string()));
             println!("📊 Strategy: Placed {} order for {} @ ${:.2}", action, symbol, price);
         }
     }

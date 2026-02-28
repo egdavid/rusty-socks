@@ -567,26 +567,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_functionality() {
-        // Create a store with very short retention time for testing
+        // Use positive retention during add so messages are not considered old mid-loop
         let mut config = MessageStoreConfig::default();
-        config.retention_hours = 0; // Everything is considered old
+        config.retention_hours = 24;
         config.max_messages = 10;
-        config.enable_background_cleanup = false; // Disable for testing
-        
+        config.enable_background_cleanup = false;
+
         let mut store = MessageStore::with_config(config);
-        
-        // Add some messages
+
         for i in 0..5 {
             let message = Message::new(format!("user{}", i), format!("Test message {}", i));
             store.add_message(message);
         }
-        
         assert_eq!(store.count(), 5);
-        
-        // Since retention_hours = 0, all messages should be cleaned up
-        let cleaned = store.cleanup_old_messages();
-        assert_eq!(cleaned, 5);
-        assert_eq!(store.count(), 0);
+
+        // Set retention to 0 so all messages are considered old; update_config runs cleanup
+        let mut zero_retention = store.config().clone();
+        zero_retention.retention_hours = 0;
+        store.update_config(zero_retention);
+
+        assert_eq!(store.count(), 0, "cleanup should remove all messages when retention is 0");
     }
 
     #[tokio::test]

@@ -32,22 +32,8 @@ impl SessionManager {
         self.message_store.as_ref()
     }
 
-    pub fn store_message(&self, message: crate::core::message::Message) -> Result<bool> {
-        if let Some(store) = &self.message_store {
-            // Note: This is now a blocking operation in async context
-            // Consider using store_message_async instead for better performance
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                message_store::add_message_async(store, message).await;
-            });
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Async version of store_message for better performance
-    pub async fn store_message_async(&self, message: crate::core::message::Message) -> Result<bool> {
+    /// Store a message in the message store (async).
+    pub async fn store_message(&self, message: crate::core::message::Message) -> Result<bool> {
         if let Some(store) = &self.message_store {
             message_store::add_message_async(store, message).await;
             Ok(true)
@@ -64,22 +50,8 @@ impl SessionManager {
         }
     }
 
-    pub fn get_recent_messages(&self, limit: usize) -> Result<Vec<crate::core::message::Message>> {
-        if let Some(store) = &self.message_store {
-            // Note: This is now a blocking operation in async context
-            // Consider using get_recent_messages_async instead for better performance
-            let rt = tokio::runtime::Handle::current();
-            let messages = rt.block_on(async {
-                message_store::recent_messages_async(store, limit).await
-            });
-            Ok(messages)
-        } else {
-            Ok(Vec::new())
-        }
-    }
-
-    /// Async version of get_recent_messages for better performance
-    pub async fn get_recent_messages_async(&self, limit: usize) -> Result<Vec<crate::core::message::Message>> {
+    /// Get recent messages from the message store (async).
+    pub async fn get_recent_messages(&self, limit: usize) -> Result<Vec<crate::core::message::Message>> {
         if let Some(store) = &self.message_store {
             Ok(message_store::recent_messages_async(store, limit).await)
         } else {

@@ -513,7 +513,7 @@ impl ServerManager {
     /// Store a message
     pub async fn store_message(&self, message: crate::core::message::Message) -> Result<bool> {
         let sessions = self.sessions.read().await;
-        sessions.store_message_async(message).await
+        sessions.store_message(message).await
     }
 
     /// Get recent messages
@@ -522,7 +522,7 @@ impl ServerManager {
         limit: usize,
     ) -> Result<Vec<crate::core::message::Message>> {
         let sessions = self.sessions.read().await;
-        sessions.get_recent_messages_async(limit).await
+        sessions.get_recent_messages(limit).await
     }
 }
 
