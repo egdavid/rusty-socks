@@ -15,7 +15,7 @@ license = "MIT"
 tokio = { version = "=1.45.1", features = ["full"] }
 warp = { version = "=0.3.7", features = ["tls"] }
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.140"
+serde_json = "=1.0.149"
 log = "=0.4.27"
 env_logger = "=0.10.2"
 uuid = { version = "=1.17.0", features = ["v4", "serde"] }
