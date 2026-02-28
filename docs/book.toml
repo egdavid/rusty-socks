@@ -1,7 +1,6 @@
 [book]
-authors = ["RustySocks Contributors"]
+authors = ["David EUGENE"]
 language = "en"
-multilingual = false
 src = "src"
 title = "RustySocks Documentation"
 
