@@ -2,6 +2,7 @@ use log::{error, info, warn};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use warp::http::StatusCode;
 use warp::{self, Filter};
 
 use rusty_socks::auth::token::TokenManager;
@@ -21,6 +22,12 @@ use rusty_socks::tls::TlsConfigBuilder;
 struct CSRFRejection;
 
 impl warp::reject::Reject for CSRFRejection {}
+
+// Custom rejection for IP rate limit (too many connections per IP)
+#[derive(Debug)]
+struct RateLimitRejection;
+
+impl warp::reject::Reject for RateLimitRejection {}
 
 #[tokio::main]
 async fn main() {
@@ -144,7 +151,7 @@ async fn main() {
         .and(with_token_manager(token_manager.clone()))
         .and(with_ip_config(ip_config.clone()))
         .and(with_config(Arc::new(config.clone())))
-        .map(
+        .and_then(
             |ws: warp::ws::Ws,
              headers: warp::hyper::HeaderMap,
              path: warp::path::FullPath,
@@ -154,27 +161,46 @@ async fn main() {
              token_manager: std::sync::Arc<TokenManager>,
              ip_config: std::sync::Arc<IpExtractionConfig>,
              config: Arc<ServerConfig>| {
-                // SECURITY: Extract real client IP address
-                let client_ip = extract_client_ip(&headers, remote_addr, &ip_config);
-                info!("New websocket connection from IP: {}", client_ip);
+                async move {
+                    // SECURITY: Extract real client IP address
+                    let client_ip = extract_client_ip(&headers, remote_addr, &ip_config);
+                    info!("New websocket connection from IP: {}", client_ip);
 
-                // SECURITY: Extract token from secure headers only (no URL tokens allowed)
-                let token = {
-                    use rusty_socks::handlers::auth::extract_token_comprehensive;
-                    extract_token_comprehensive(&path.as_str().parse().unwrap_or_default(), &headers)
-                };
-
-                ws.on_upgrade(move |socket| {
-                    // Use the thread pool to handle the WebSocket client
-                    let handle_client =
-                        handle_ws_client(socket, server_manager, token, token_manager, config, client_ip);
-                    match thread_pool.execute(handle_client) {
-                        Some(_) => info!("WebSocket connection processing assigned to thread pool"),
-                        None => error!("Thread pool is at capacity, connection rejected"),
+                    // SECURITY: IP rate limit - check before upgrade
+                    if !server_manager.can_ip_connect(client_ip).await {
+                        info!("Connection rejected: IP rate limit exceeded for {}", client_ip);
+                        return Err(warp::reject::custom(RateLimitRejection));
                     }
-                    // Return a future that resolves when the client is handled
-                    async {}
-                })
+                    if !server_manager.register_ip_connection(client_ip).await {
+                        info!("Connection rejected: IP slot race for {}", client_ip);
+                        return Err(warp::reject::custom(RateLimitRejection));
+                    }
+
+                    // SECURITY: Extract token from secure headers only (no URL tokens allowed)
+                    let token = {
+                        use rusty_socks::handlers::auth::extract_token_comprehensive;
+                        extract_token_comprehensive(&path.as_str().parse().unwrap_or_default(), &headers)
+                    };
+
+                    Ok(ws.on_upgrade(move |socket| {
+                        // Use the thread pool to handle the WebSocket client
+                        let handle_client =
+                            handle_ws_client(socket, server_manager.clone(), token, token_manager, config, client_ip);
+                        match thread_pool.execute(handle_client) {
+                            Some(_) => info!("WebSocket connection processing assigned to thread pool"),
+                            None => {
+                                error!("Thread pool is at capacity, connection rejected");
+                                // Unregister IP so the slot is released (handle_ws_client never runs)
+                                let sm = server_manager.clone();
+                                tokio::spawn(async move {
+                                    sm.unregister_ip_connection(client_ip).await;
+                                });
+                            }
+                        }
+                        // Return a future that resolves when the client is handled
+                        async {}
+                    }))
+                }
             },
         );
 
@@ -194,8 +220,11 @@ async fn main() {
             with_api_security_headers(json_response)
         });
 
-    // Combine routes
-    let routes = ws_route.or(health_route).or(stats_route);
+    // Combine routes and handle rejections (e.g. 429 for rate limit)
+    let routes = ws_route
+        .or(health_route)
+        .or(stats_route)
+        .recover(handle_rejection);
 
     // Build the server address
     let addr: SocketAddr = match format!("{}:{}", config.host, config.port).parse() {
@@ -279,6 +308,19 @@ fn with_ip_config(
     ip_config: std::sync::Arc<IpExtractionConfig>,
 ) -> impl Filter<Extract = (std::sync::Arc<IpExtractionConfig>,), Error = Infallible> + Clone {
     warp::any().map(move || ip_config.clone())
+}
+
+async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, Infallible> {
+    if err.find::<RateLimitRejection>().is_some() {
+        let body = warp::reply::json(&serde_json::json!({"error": "Too Many Requests"}));
+        return Ok(warp::reply::with_status(body, StatusCode::TOO_MANY_REQUESTS));
+    }
+    if err.is_not_found() {
+        let body = warp::reply::json(&serde_json::json!({"error": "Not Found"}));
+        return Ok(warp::reply::with_status(body, StatusCode::NOT_FOUND));
+    }
+    let body = warp::reply::json(&serde_json::json!({"error": "Internal Server Error"}));
+    Ok(warp::reply::with_status(body, StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 // CSRF validation filter that rejects connections before WebSocket upgrade

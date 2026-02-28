@@ -13,6 +13,23 @@ use crate::core::message::SocketMessage;
 use crate::core::{MessageHandler, SharedServerManager};
 use crate::handlers::auth::authenticate_connection;
 
+/// Guard that calls `unregister_ip_connection` when dropped (e.g. on any return path or panic).
+/// Uses `tokio::spawn` in `Drop` because `Drop` cannot be async.
+struct IpConnectionGuard {
+    server_manager: SharedServerManager,
+    ip: IpAddr,
+}
+
+impl Drop for IpConnectionGuard {
+    fn drop(&mut self) {
+        let server_manager = self.server_manager.clone();
+        let ip = self.ip;
+        tokio::spawn(async move {
+            server_manager.unregister_ip_connection(ip).await;
+        });
+    }
+}
+
 // Handle a WebSocket connection
 pub async fn handle_ws_client(
     ws: WebSocket,
@@ -22,6 +39,11 @@ pub async fn handle_ws_client(
     config: Arc<crate::config::ServerConfig>,
     client_ip: IpAddr,
 ) {
+    let _ip_guard = IpConnectionGuard {
+        server_manager: server_manager.clone(),
+        ip: client_ip,
+    };
+
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, rx) = mpsc::unbounded_channel();
 
