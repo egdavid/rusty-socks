@@ -7,7 +7,11 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::client::IntoClientRequest,
+    tungstenite::protocol::Message,
+};
 
 // Server process handle for proper cleanup
 struct ServerHandle {
@@ -52,11 +56,21 @@ fn start_server(port: u16) -> Result<ServerHandle, String> {
     println!("Starting server on port {}", port);
 
     // Start the actual server process with specified port
+    // JWT and CSRF secrets must be >= 32 chars, different, and not match insecure patterns
     let process = Command::new("cargo")
         .args(["run", "--bin", "rusty_socks"])
         .env("RUSTY_SOCKS_HOST", "127.0.0.1")
         .env("RUSTY_SOCKS_PORT", port.to_string())
-        .env("RUSTY_SOCKS_JWT_SECRET", "test-secret-key")
+        .env(
+            "RUSTY_SOCKS_JWT_SECRET",
+            "ws_e2e_jwt_key_32_chars_minimum_abc123",
+        )
+        .env(
+            "RUSTY_SOCKS_CSRF_SECRET",
+            "ws_e2e_csrf_key_32_chars_minimum_def456",
+        )
+        .env("RUSTY_SOCKS_DEVELOPMENT_MODE", "true")
+        .env("RUSTY_SOCKS_ALLOW_ANONYMOUS", "true")
         .env("RUST_LOG", "debug")
         .spawn()
         .map_err(|e| format!("Failed to start Rusty Socks server: {}", e))?;
@@ -117,10 +131,19 @@ fn test_websocket_connection_and_messaging() {
 
         println!("Connecting to URL: {}", url);
 
+        // Build request with Origin header (required by server CSRF protection)
+        let origin = format!("http://{}:{}", host, port);
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .expect("valid WebSocket URL");
+        request
+            .headers_mut()
+            .insert("Origin", origin.parse().expect("valid Origin"));
+
         // Establish WebSocket connection with explicit timeout
-        // This prevents indefinite blocking if server doesn't respond
         let (mut ws_stream, _) =
-            match tokio::time::timeout(Duration::from_secs(5), connect_async(url)).await {
+            match tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await {
                 Ok(conn_result) => match conn_result {
                     Ok(ws) => ws,
                     Err(e) => {
