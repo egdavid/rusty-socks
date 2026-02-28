@@ -1,0 +1,16 @@
+# .coderabbit.yaml
+language: "en-US"
+reviews:
+  profile: "chill"
+  request_review_command: "rabbit review"
+  high_level_summary: true
+instructions: |
+  You are acting as a Senior Rust Security Engineer. 
+  This project is a high-performance WebSocket server (RustySocks).
+  
+  Please focus your review on:
+  - **Async Correctness**: Ensure no blocking calls are made within the Tokio runtime.
+  - **Security**: Verify the IP-based rate limiting logic and ensure no authentication bypasses.
+  - **Performance**: Look for unnecessary allocations (prefer `Bytes` or `Cow` where applicable).
+  - **Idiomatic Rust**: Suggest modern 2024/2026 patterns (let-else, etc.).
+  - **Dependency Safety**: Flag any outdated or vulnerable crates identified in the 2026 audit.
