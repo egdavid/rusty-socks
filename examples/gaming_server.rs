@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::RwLock;
 use tokio::time::{Duration, interval};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
@@ -263,23 +263,20 @@ async fn matchmaking_service(game_state: SharedGameState) {
         let mut state = game_state.write().await;
         let mut lobbies_to_start = Vec::new();
         
-        // Check lobbies that are ready to start
-        for (lobby_id, lobby) in state.lobbies.iter_mut() {
+        // First pass: collect lobby IDs where all players are ready (read-only)
+        for (lobby_id, lobby) in state.lobbies.iter() {
             if lobby.status == LobbyStatus::Waiting && lobby.players.len() >= 2 {
-                // Check if all players are ready
                 let all_ready = lobby.players.iter().all(|player_id| {
                     state.players.get(player_id)
                         .map_or(false, |p| p.ready)
                 });
-                
                 if all_ready {
-                    lobby.status = LobbyStatus::Starting;
                     lobbies_to_start.push(lobby_id.clone());
                 }
             }
         }
         
-        // Start games for ready lobbies
+        // Second pass: start games for ready lobbies (mutations)
         for lobby_id in lobbies_to_start {
             if let Some(lobby) = state.lobbies.get(&lobby_id) {
                 let game_id = Uuid::new_v4().to_string();

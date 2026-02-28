@@ -1,5 +1,5 @@
 //! TLS/SSL configuration and utilities
-//! 
+//!
 //! This module provides secure TLS configuration for the WebSocket server.
 //! It implements best practices for TLS security including:
 //! - Secure cipher suites
@@ -7,6 +7,8 @@
 //! - Certificate validation
 //! - Security headers
 
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{Certificate, PrivateKey, ServerConfig as RustlsServerConfig};
 use std::fs::File;
 use std::io::BufReader;
@@ -27,56 +29,39 @@ impl TlsConfigBuilder {
 
     /// Build the TLS configuration with security best practices
     pub fn build(self) -> Result<Arc<RustlsServerConfig>> {
-        // Load certificate chain
+        // Load certificate chain using rustls-pki-types (maintained alternative to rustls-pemfile)
         let cert_file = File::open(&self.cert_path)
             .map_err(|e| RustySocksError::ConfigError(
                 format!("Failed to open certificate file '{}': {}", self.cert_path, e)
             ))?;
-        let mut cert_reader = BufReader::new(cert_file);
-        
-        let cert_chain: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)
+        let cert_reader = BufReader::new(cert_file);
+
+        let cert_chain: Vec<Certificate> = CertificateDer::pem_reader_iter(cert_reader)
+            .map(|cert| cert.map(|c| Certificate(c.into_owned().to_vec())))
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| RustySocksError::ConfigError(
                 format!("Failed to parse certificate file '{}': {}", self.cert_path, e)
-            ))?
-            .into_iter()
-            .map(Certificate)
-            .collect();
+            ))?;
 
-        // Load private key
+        if cert_chain.is_empty() {
+            return Err(RustySocksError::ConfigError(
+                format!("No certificates found in '{}'", self.cert_path)
+            ));
+        }
+
+        // Load private key (PKCS8, PKCS1, or SEC1)
         let key_file = File::open(&self.key_path)
             .map_err(|e| RustySocksError::ConfigError(
                 format!("Failed to open private key file '{}': {}", self.key_path, e)
             ))?;
         let mut key_reader = BufReader::new(key_file);
-        
-        // Try to parse different key formats
-        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+
+        let key_der = PrivateKeyDer::from_pem_reader(&mut key_reader)
             .map_err(|e| RustySocksError::ConfigError(
-                format!("Failed to parse PKCS8 private key from '{}': {}", self.key_path, e)
+                format!("Failed to parse private key from '{}': {}", self.key_path, e)
             ))?;
 
-        // If no PKCS8 keys found, try RSA format
-        if keys.is_empty() {
-            let key_file = File::open(&self.key_path)?;
-            let mut key_reader = BufReader::new(key_file);
-            keys = rustls_pemfile::rsa_private_keys(&mut key_reader)
-                .map_err(|e| RustySocksError::ConfigError(
-                    format!("Failed to parse RSA private key from '{}': {}", self.key_path, e)
-                ))?;
-        }
-
-        if keys.is_empty() {
-            return Err(RustySocksError::ConfigError(
-                format!("No private keys found in '{}'", self.key_path)
-            ));
-        }
-
-        let private_key = PrivateKey(
-            keys.into_iter().next()
-                .ok_or_else(|| RustySocksError::ConfigError(
-                    format!("No private keys found in '{}'", self.key_path)
-                ))?
-        );
+        let private_key = PrivateKey(key_der.secret_der().to_vec());
 
         // Validate certificate and key match
         Self::validate_cert_key_pair(&cert_chain, &private_key)?;

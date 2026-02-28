@@ -229,7 +229,7 @@ impl TokenManager {
                 token_id: claims.get_token_id(),
                 user_id: claims.sub.clone(),
                 revoked_at: chrono::Utc::now(),
-                expires_at: chrono::DateTime::from_timestamp(claims.exp as i64, 0)
+                expires_at: chrono::DateTime::<chrono::Utc>::from_timestamp_secs(claims.exp as i64)
                     .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24)),
                 reason,
                 context: None,
