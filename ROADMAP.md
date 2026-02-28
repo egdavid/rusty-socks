@@ -3,6 +3,9 @@
 ## Vision
 Make Rusty Socks the reference WebSocket server for applications requiring security, performance, and scalability.
 
+## Licensing
+Rusty Socks is released under the **MIT License** to maximize adoption and community use. This open-source licensing choice supports integration in both commercial and non-commercial projects with minimal friction.
+
 ## ✅ Phase 1 - Foundation (Completed)
 - Functional WebSocket server with room-based messaging
 - Robust JWT/CSRF authentication
