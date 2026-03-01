@@ -69,4 +69,7 @@ benches/results/
 
 # Local development
 temp/
-tmp/
+tmp/.wrangler
+.wrangler/
+dist/
+.dev.vars

@@ -1,8 +1,10 @@
 # Architecture Overview
 
-Rusty Socks v0.2.0 uses a multithreaded architecture built around a custom **ThreadPool**, with fully asynchronous task management and no `block_on` in the request path. This design avoids runtime stalls and aligns with the improvements identified in the 2026 security and architecture audit.
+If you're new to the codebase, this page is your map. We'll walk through how requests flow from the wire to the WebSocket handler, why we use a custom thread pool, and why we went all-in on async (no `block_on`). Everything here reflects choices we made for v0.2.0, including the 2026 security and architecture audit.
 
 ## Flow from Warp Filters to WebSocket Handler
+
+Here's the path a WebSocket connection takes before your handler sees it:
 
 ```mermaid
 flowchart LR
@@ -29,51 +31,23 @@ flowchart LR
     Upgrade --> Execute --> HandleClient
 ```
 
-Request processing order: path and WebSocket upgrade → headers → CSRF validation → client IP extraction → IP rate-limit check → IP registration → token extraction → upgrade callback → task submitted to the thread pool → `handle_ws_client` runs on the pool.
+In plain English: we match the path and WebSocket upgrade, grab headers, run CSRF validation, figure out the client IP, check and reserve an IP slot, extract the auth token, then hand the upgraded socket to the thread pool. You'll find it useful to keep this order in mind when debugging—if something fails, you'll know which layer said no.
 
-## Multithreaded Architecture and Custom ThreadPool
+## Why a Custom Thread Pool?
 
-The server does not run WebSocket handlers on the main Tokio runtime. Instead, a dedicated **ThreadPool** (`core::thread_pool`) runs a separate multi-threaded Tokio runtime used only for handling client connections. This isolates connection workload and provides built-in DoS protections.
+We chose **not** to run WebSocket handlers on the main Tokio runtime. Instead, a dedicated **ThreadPool** in `core::thread_pool` runs its own multi-threaded Tokio runtime just for client connections. That gives us two things: isolation (so a burst of connections doesn't starve the rest of the server) and built-in DoS protections (task count and rate limits). When you're scaling up, you can tune the pool size and queue depth without touching the main runtime.
 
-### ThreadPool Construction
+### How the Pool Is Built
 
-The pool is built from `ServerConfig` via `ThreadPool::from_config(config)` (or `ThreadPool::new(worker_count, max_queued_tasks)`). In `src/core/thread_pool.rs`:
+The pool comes from `ServerConfig` via `ThreadPool::from_config(config)`. Under the hood we use `tokio::runtime::Builder::new_multi_thread()` with at least two worker threads (we clamp `worker_count` to a minimum of 2 so you don't accidentally run with one and create a bottleneck). We enable I/O and time drivers and name the threads `"rusty-socks-worker"` so they're easy to spot in a profiler. Be careful with `max_queued_tasks`: it defaults to 1000; if you set it too low, you'll see connections rejected under normal load. We also cap how many tasks we *accept* per second (derived from worker count, up to 1000/sec) so a single client can't flood the queue.
 
-- **Runtime**: `tokio::runtime::Builder::new_multi_thread()` with:
-  - `worker_threads(actual_workers)` — `actual_workers` is `worker_count.max(2)` (minimum 2 threads).
-  - `enable_io()` and `enable_time()`.
-  - `thread_name("rusty-socks-worker")`.
-- **Limits**:
-  - `max_queued_tasks`: cap on how many tasks can be in flight (default 1000 from `DEFAULT_MAX_QUEUED_TASKS`).
-  - Task submission rate: at most `(actual_workers * 100).min(1000)` tasks per second; excess submissions are rejected.
+### What Happens When You Execute
 
-### Executing Work on the Pool
+`ThreadPool::execute(future)` does three things: it checks the per-second rate limit, checks that we're under `max_queued_tasks`, then spawns your future on the pool's runtime and returns a `JoinHandle` (or `None` if we had to reject). The important part: **we never await that handle in the request path**. So the Warp filter returns immediately after submitting the task; the connection is handled in the background. If `execute` returns `None`, we reject the connection and call `unregister_ip_connection` so we don't leak the IP slot. You'll find this pattern in `src/bin/server.rs` right around the WebSocket upgrade callback.
 
-`ThreadPool::execute<F>(&self, future: F) -> Option<JoinHandle<F::Output>>` where `F: Future + Send + 'static`, `F::Output: Send + 'static`:
+## Async All the Way: Why We Kicked block_on Out
 
-1. Checks the per-second task rate limit; if exceeded, returns `None`.
-2. Checks that the current number of active tasks is below `max_queued_tasks`; if not, returns `None`.
-3. Increments the active-task count, spawns the future on the pool’s runtime via `runtime.spawn(...)`, and wraps it so the count is decremented when the task completes.
-4. Returns `Some(handle)` immediately. The caller does **not** await the handle in the request path.
+> **Developer Insight**  
+> The 2026 audit flagged a classic pitfall: using `block_on` (or any blocking call) inside an async context. It can stall the entire executor and kill latency and throughput. So we made a rule: **no `block_on` in the request path.** You'll only see it in tests (e.g. `thread_pool.rs` and `websocket_test.rs`) where we need to drive a future to completion in a synchronous test. In production, the request path is pure async/await.
 
-In `src/bin/server.rs`, the WebSocket route calls `thread_pool.execute(handle_ws_client(...))`. If the result is `None` (rate limit or capacity), the connection is rejected and `unregister_ip_connection(client_ip)` is invoked so the IP slot is released.
-
-## Async Task Management and Moving Away from block_on
-
-The 2026 audit highlighted that blocking the runtime (e.g. with `block_on`) in an async context can stall the entire executor and degrade latency and throughput. Rusty Socks v0.2.0 removes all such blocking from the request path.
-
-### Pure async/await on the Request Path
-
-- **Entry point**: The binary uses `#[tokio::main]`, so the main runtime is async.
-- **Upgrade callback**: After the Warp filters run (CSRF, IP rate limit, IP registration, token extraction), `ws.on_upgrade(move |socket| { ... })` is used. Inside the callback:
-  - `handle_ws_client(socket, ...)` is passed to `thread_pool.execute(...)`.
-  - The callback returns `async {}` — a future that completes immediately. The runtime does **not** wait for the WebSocket connection to finish; it only waits for the upgrade future to resolve.
-- **No block_on in production path**: A search of the codebase shows `block_on` only in test code (e.g. `src/core/thread_pool.rs` tests, `tests/websocket_test.rs`). No production path blocks the runtime.
-
-### Why This Matters
-
-- The main Tokio runtime stays responsive for accepting new connections and running other filters.
-- Heavy or long-lived WebSocket work runs on the pool’s runtime, with its own thread count and task limits.
-- Rejections (rate limit, full pool) are handled without blocking: the server returns an error (e.g. 429) and releases the IP slot when the pool refuses the task.
-
-Together, the custom ThreadPool and the strict avoidance of `block_on` in the request path form the basis of the v0.2.0 architecture and meet the 2026 audit’s guidance on async design and runtime stalls.
+Here's how that plays out. The binary uses `#[tokio::main]`, so the main runtime is async. When we're inside the WebSocket upgrade callback, we call `thread_pool.execute(handle_ws_client(...))` and then return `async {}`—a future that completes right away. The runtime doesn't wait for the WebSocket to close; it only waits for that empty future. So the main runtime stays free to accept new connections and run other filters, while the heavy, long-lived work runs on the pool with its own limits. When we have to reject (rate limit or full pool), we do it without blocking and we still release the IP slot. That's the behavior the 2026 audit asked for, and it's the basis of our v0.2.0 architecture.

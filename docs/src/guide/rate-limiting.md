@@ -1,46 +1,37 @@
 # Rate Limiting
 
-Rusty Socks v0.2.0 provides **IP-based rate limiting** for WebSocket connections and per-user message rate limiting. This guide explains how to configure and use them, how the **IpConnectionGuard** ensures cleanup via the `Drop` trait, and how HTTP 429 rejections are returned.
+This guide covers our **IP-based** connection rate limiting and per-user message limits. We'll explain how to configure them, how the **IpConnectionGuard** makes sure we always release an IP slot when a connection ends (even on panic or early return), and what clients see when they hit a limit (HTTP 429). If you're integrating a client or tuning for production, you'll find this useful.
 
 ## IP-Based Rate Limiting
 
-### Overview
+### What Happens Before the Upgrade
 
-Before a WebSocket connection is upgraded, the server:
-
-1. Extracts the client IP (from headers or remote address).
-2. Checks whether that IP is allowed to open another connection (`can_ip_connect`).
-3. Reserves a slot for that IP (`register_ip_connection`).
-
-If either the check or the registration fails, the request is **rejected with HTTP 429 Too Many Requests**. The connection is never upgraded, so the client does not consume a WebSocket handler slot.
+Before we upgrade a WebSocket, we: (1) figure out the client IP (from headers or remote address), (2) check whether that IP is allowed to open another connection (`can_ip_connect`), and (3) reserve a slot for that IP (`register_ip_connection`). If either the check or the reservation fails, we **reject the request with HTTP 429** and never upgrade. So the client never gets a WebSocket handler; they just get a 429 and should back off.
 
 ### Configuration
 
-Connection limits are read from the environment when building `ServerConfig` (e.g. `ServerConfig::from_env()`).
+Limits are read from the environment when we build `ServerConfig` (e.g. `ServerConfig::from_env()`).
 
-| Environment variable | Description | Default |
-|----------------------|-------------|---------|
-| `RUSTY_SOCKS_MAX_CONN_PER_IP` | Maximum simultaneous WebSocket connections per IP | `10` |
+| Environment variable | What it does | Default |
+|----------------------|--------------|---------|
+| `RUSTY_SOCKS_MAX_CONN_PER_IP` | Max simultaneous WebSocket connections per IP | `10` |
 
-The server builds the `ServerManager` with these values (e.g. `ServerManager::with_rate_limits(max_connections_per_ip, max_messages_per_minute)`), so the `ConnectionLimiter` inside the manager uses the configured cap.
+The server passes this into `ServerManager::with_rate_limits(...)`, and the `ConnectionLimiter` inside the manager enforces it. Be careful with very low values: legitimate multi-tab or multi-device users from the same NAT can hit the limit quickly.
 
-### How It Works in Code
+### In Code
 
-- **ConnectionLimiter** (`core::rate_limiter`):
-  - `allow_connection(ip)` — returns whether `current_count < max_connections_per_ip`.
-  - `add_connection(ip)` — increments the count for that IP if under the limit; returns `false` if the limit is already reached.
-  - `remove_connection(ip)` — decrements the count and removes the entry when it reaches zero.
+**ConnectionLimiter** (`core::rate_limiter`) has: `allow_connection(ip)` (are we under the cap?), `add_connection(ip)` (reserve a slot; returns `false` if already at limit), and `remove_connection(ip)` (release the slot). In the WebSocket route we call `can_ip_connect` then `register_ip_connection`; if either fails we reject with `RateLimitRejection`. When the handler eventually exits (or never runs because the pool rejected the task), we need to release the slot—that's the **IpConnectionGuard**'s job, below.
 
-- In the WebSocket route (`src/bin/server.rs`), the flow is:
-  - `server_manager.can_ip_connect(client_ip).await` → if `false`, reject with `RateLimitRejection`.
-  - `server_manager.register_ip_connection(client_ip).await` → if `false` (e.g. race where the limit was reached), reject with `RateLimitRejection`.
-  - Then proceed to upgrade. When the handler finishes (or is never run because the pool rejected the task), the IP slot must be released; that is done by **IpConnectionGuard** (see below).
+## IpConnectionGuard: Why We Use a Guard and Drop
 
-## IpConnectionGuard and Resource Cleanup via Drop
+Each WebSocket handler holds an **IpConnectionGuard** that ties the connection's lifetime to the IP slot. When the handler exits—whether it returns normally, returns early after an auth failure, or panics—the guard is dropped and we release the slot. You don't have to remember to call `unregister_ip_connection` yourself.
 
-Each WebSocket connection handler holds an **IpConnectionGuard** that ties the connection’s lifetime to the IP slot. When the handler exits (normally or by panic), the guard is dropped and the slot is released.
+> **Developer Insight**  
+> The 2026 audit pointed out that it's easy to leak connection slots if you only call `unregister_ip_connection` on the "happy path." Any early return or panic could skip that call, and over time you'd run out of slots for that IP (or globally). We chose a **RAII guard** so that release happens in `Drop`—Rust guarantees `Drop` runs when the guard goes out of scope, no matter how we left the function. So we get cleanup on success, on error, and on panic. That's why you'll see the guard created at the very start of `handle_ws_client` and held for the whole function.
 
-### Definition (`handlers::websocket`)
+### How It's Implemented
+
+`Drop` in Rust is synchronous and can't be `async`, so we can't directly `await unregister_ip_connection` inside `drop`. Instead we spawn a small task that does the async unregister. The guard just holds the `ServerManager` and the IP; when it's dropped, we `tokio::spawn` that task and the slot gets released when the task runs. Because the guard lives in the handler's stack frame, it's always dropped when the handler returns or panics—so we never leak the slot.
 
 ```rust
 /// Guard that calls `unregister_ip_connection` when dropped (e.g. on any return path or panic).
@@ -61,7 +52,7 @@ impl Drop for IpConnectionGuard {
 }
 ```
 
-At the start of `handle_ws_client`, the handler creates a guard and keeps it for the duration of the function:
+At the top of `handle_ws_client` we create the guard and keep it for the duration:
 
 ```rust
 let _ip_guard = IpConnectionGuard {
@@ -70,56 +61,15 @@ let _ip_guard = IpConnectionGuard {
 };
 ```
 
-### Why Drop and tokio::spawn
+You'll find it useful to keep this pattern in mind if you ever add new exit paths in the handler: the guard will still run, so you don't need to add manual cleanup there.
 
-- `Drop` in Rust is synchronous and cannot be `async`. So the guard cannot directly `await unregister_ip_connection`.
-- The implementation therefore spawns a new task that performs `unregister_ip_connection(ip).await`. That task runs on the current runtime and eventually decrements the IP’s connection count and removes the slot if it reaches zero.
-- Because the guard is stored in the handler’s stack frame, it is always dropped when the handler returns or panics. That guarantees the IP slot is released even on early returns (e.g. after an authentication failure) or on panic, avoiding connection-count leaks.
+## HTTP 429: What the Client Sees
 
-This pattern is the RAII approach for async cleanup: the guard owns the “reservation” of the IP slot, and `Drop` ensures release regardless of control flow.
+When we reject a request for rate limiting, we use a custom rejection type (`RateLimitRejection`) and a recovery handler so the client gets a proper HTTP response instead of a generic error.
 
-## HTTP 429 Rejections
+We use `RateLimitRejection` when: `can_ip_connect` returns `false` (IP already at its connection limit), or `register_ip_connection` returns `false` (e.g. limit hit in a race). Our `handle_rejection` function turns that into **429 Too Many Requests** with a JSON body `{"error":"Too Many Requests"}`. So when you're testing or building a client, treat 429 as "too many connections from this IP; back off and maybe close some connections before retrying." We don't return 429 for per-user *message* rate limiting—that's handled inside the WebSocket with a different error (e.g. `RATE_LIMITED`). The 429 here is specifically for **connection** rate limiting.
 
-When the server rejects a request due to rate limiting, it uses a custom rejection type and a recovery handler so the client receives a proper HTTP response.
-
-### Rejection Type
-
-In `src/bin/server.rs`:
-
-```rust
-struct RateLimitRejection;
-
-impl warp::reject::Reject for RateLimitRejection {}
-```
-
-This type is used when:
-
-- `can_ip_connect(client_ip)` returns `false` (IP already at its connection limit).
-- `register_ip_connection(client_ip)` returns `false` (e.g. limit reached in a race).
-- Optionally, other rate-limit conditions could be mapped to the same rejection in the future.
-
-### Recovery and Response Body
-
-The `handle_rejection` function maps `RateLimitRejection` to HTTP 429 with a JSON body:
-
-```rust
-async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, Infallible> {
-    if err.find::<RateLimitRejection>().is_some() {
-        let body = warp::reply::json(&serde_json::json!({"error": "Too Many Requests"}));
-        return Ok(warp::reply::with_status(body, StatusCode::TOO_MANY_REQUESTS));
-    }
-    // ... other rejections
-}
-```
-
-### Example Client-Side Behavior
-
-When the server returns 429:
-
-- **Status code**: `429 Too Many Requests`.
-- **Body** (typical): `{"error":"Too Many Requests"}`.
-
-Example with `curl` (connection refused at application level after TCP connect; the server may close the connection or respond with 429 depending on where the limit is applied):
+Example response:
 
 ```text
 HTTP/1.1 429 Too Many Requests
@@ -128,8 +78,8 @@ Content-Type: application/json
 {"error":"Too Many Requests"}
 ```
 
-Clients should treat 429 as a signal to back off (e.g. exponential backoff or retry-after if the server adds that header in the future) and not open more connections from the same IP until some connections are closed.
+Clients should back off (e.g. exponential backoff) and avoid opening more connections from the same IP until some are closed.
 
 ## Per-User Message Rate Limiting
 
-In addition to IP-based connection limits, the server limits how many messages each user can send per minute. This is configured via `RUSTY_SOCKS_RATE_LIMIT_MSG_PER_MIN` (default 60). When exceeded, the server does not return HTTP 429 for the WebSocket upgrade; instead, it rejects the individual message and can send a WebSocket frame or message with a rate-limit error (e.g. `RATE_LIMITED`). See the message handler and server API for the exact error payloads. The 429 response described above is specifically for **connection** rate limiting (too many connections per IP).
+Besides per-IP connection limits, we limit how many messages each user can send per minute. That's configured via `RUSTY_SOCKS_RATE_LIMIT_MSG_PER_MIN` (default 60). When a user exceeds it, we don't close the WebSocket or return 429 on the HTTP side—we reject the individual message and can send a WebSocket frame with a rate-limit error (e.g. `RATE_LIMITED`). So: 429 = too many *connections* from this IP; in-stream rate limit = too many *messages* from this user. See the message handler and server API for the exact payloads.

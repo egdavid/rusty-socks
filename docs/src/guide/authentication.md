@@ -1,121 +1,67 @@
 # Authentication
 
-Rusty Socks v0.2.0 uses **JWT (JSON Web Tokens)** for authenticating WebSocket connections and **Role-Based Access Control (RBAC)** for permissions. This guide covers the jsonwebtoken v10.3.0 integration, the available roles (Owner, Admin, Moderator, Member, Guest), and how tokens and claims are validated. The design reflects the 2026 audit baseline for authentication and secret handling.
+We use **JWT (JSON Web Tokens)** to authenticate WebSocket connections and **roles** (Owner, Admin, Moderator, Member, Guest) to control what users can do. This guide walks through our jsonwebtoken v10.3.0 setup, how we validate tokens and claims, and how RBAC works. Everything here is aligned with the 2026 audit's recommendations for auth and secret handling.
 
-## JWT Integration (jsonwebtoken v10.3.0)
+## JWT: How We Use jsonwebtoken v10.3.0
 
-### Dependency
-
-In `Cargo.toml`, the crate is pinned to version 10.3.0 with the **aws_lc_rs** crypto backend:
+We pin to **jsonwebtoken 10.3.0** and use the **aws_lc_rs** crypto backend so we have a clear, reproducible crypto stack. You'll find it in `Cargo.toml` as:
 
 ```toml
 jsonwebtoken = { version = "=10.3.0", features = ["aws_lc_rs"] }
 ```
 
-Pinning and an explicit crypto feature support reproducible builds and a clear cryptographic stack.
+**TokenManager** (`auth::token`) is the single place we create and validate tokens. We build encoding/decoding keys from the shared secret, use the library's default validation (so `exp` and `nbf` are checked), and optionally plug in a revocation store. When we validate a token we decode it, then check revocation (by `jti` or a derived id) if the store is configured—only then do we return the claims. So when you're debugging auth, think: decode → revoke check → claim checks. We use `get_claims` for the WebSocket auth path.
 
-### TokenManager
+### What's in the Token (Claims)
 
-The **TokenManager** (`auth::token`) centralizes JWT creation and validation:
+Our JWT payload is the **Claims** struct: `sub` (user id), `username`, `exp`, `iat`, `nbf`, and optional `email`, `iss`, `aud`, `jti`. We use `jti` (or a hash of the token if `jti` is missing) for revocation. Helpers like `Claims::new`, `Claims::with_expiration`, `get_token_id()`, and `is_expired()` are there when you need to issue or inspect tokens.
 
-- **Keys**: `EncodingKey` and `DecodingKey` are built from the shared secret (`from_secret(secret.as_bytes())`).
-- **Validation**: The library’s default validation (e.g. `exp`, `nbf`) is used via `Validation::default()`.
-- **Encoding**: `generate_token(&self, claims: &Claims) -> Result<String>` uses `encode(&Header::default(), claims, &self.encoding_key)`.
-- **Decoding**: `validate_token(&self, token: &str) -> Result<TokenData<Claims>>` uses `decode::<Claims>(token, &self.decoding_key, &self.validation)`. If a revocation store is configured, the token’s identifier (e.g. `jti`) is checked before returning; revoked tokens are rejected.
-- **Claims**: `get_claims(&self, token: &str) -> Result<Claims>` calls `validate_token` and returns the decoded claims. This is the path used when authenticating a WebSocket connection.
+| Field      | Type              | Description                |
+|-----------|-------------------|----------------------------|
+| `sub`     | String            | Subject (user ID)          |
+| `username`| `Option<String>`  | Display name               |
+| `exp`     | usize             | Expiration (UTC)          |
+| `iat`     | usize             | Issued at (UTC)            |
+| `nbf`     | usize             | Not before (UTC)           |
+| `email`   | `Option<String>`  | Email (optional)           |
+| `iss`     | `Option<String>`  | Issuer (optional)          |
+| `aud`     | `Option<String>`  | Audience (optional)        |
+| `jti`     | `Option<String>`  | JWT ID (for revocation)    |
 
-TokenManager can be constructed with `new(secret)` or `with_revocation_store(secret, revocation_store)` to enable revocation checks.
+### Where We Take the Token From (Headers Only)
 
-### Claims Structure
+We **never** read the token from the URL. That would leak it into logs, browser history, and Referer headers. So we only look at headers. **extract_token_comprehensive** tries, in order: (1) `Authorization: Bearer <token>`, (2) `Sec-WebSocket-Protocol` with `bearer.<token>` or `token.<token>`, (3) `X-Auth-Token`. If you're building a client, use one of those; `extract_token_from_url` is disabled and will always return `None` (and log a security warning).
 
-The JWT payload is represented by **Claims** (`auth::token`):
+### What We Check After Decoding
 
-| Field      | Type              | Description                          |
-|-----------|-------------------|--------------------------------------|
-| `sub`     | String            | Subject (user ID)                    |
-| `username`| `Option<String>`  | Display name                         |
-| `exp`     | usize             | Expiration (UTC timestamp)           |
-| `iat`     | usize             | Issued at (UTC timestamp)            |
-| `nbf`     | usize             | Not before (UTC timestamp)           |
-| `email`   | `Option<String>`  | Email (optional)                     |
-| `iss`     | `Option<String>`  | Issuer (optional)                    |
-| `aud`     | `Option<String>`  | Audience (optional)                  |
-| `jti`     | `Option<String>`  | JWT ID (for revocation)              |
+After we decode the token, we apply a few extra checks so we don't trust malformed or oversized claims: token length > 1000, any control character in the token, empty `sub` or `username`, or `sub`/`username` too long (e.g. sub > 100, username > 50). We also use an **AuthTimer** to enforce a minimum response time (e.g. 100 ms) so we don't leak information via timing. On failure we send a generic "Authentication failed" message—no details. Be careful with adding new error messages; the 2026 audit pushed us to keep auth errors generic so we don't help an attacker.
 
-Helpers include `Claims::new`, `Claims::with_expiration`, `get_token_id()` (for revocation), and `is_expired()`.
+## Roles: Owner, Admin, Moderator, Member, Guest
 
-### Token Extraction (Headers Only)
+Permissions are modeled as **roles** per room (and optionally a **global role** on the user). Before we do something sensitive (send a message, kick a user, create a room, etc.) we resolve the user's role and check the right permission.
 
-Tokens are taken **only from headers**; the URL is not used, to avoid exposure in logs, history, and Referer.
+### The Five Roles
 
-**extract_token_comprehensive** (`handlers::auth`) tries, in order:
+We have five roles, from most to least privileged:
 
-1. **Authorization** — `Authorization: Bearer <token>` (via `extract_bearer_token`).
-2. **Sec-WebSocket-Protocol** — value like `bearer.<token>` or `token.<token>`.
-3. **X-Auth-Token** — custom header with the raw token.
+| Role          | What they're for |
+|---------------|------------------|
+| **Owner**     | Full control over the room and roles. |
+| **Admin**     | Manage roles and moderate; can't transfer/delete the room itself. |
+| **Moderator** | Kick, mute, send/delete messages. |
+| **Member**    | Send messages and invite users. |
+| **Guest**     | Send messages only. |
 
-`extract_token_from_url` is disabled and always returns `None`; it logs a security message directing use of the above headers.
+Each role has a fixed set of **Permission** flags (e.g. `ManageRoom`, `ManageRoles`, `KickUsers`, `SendMessages`, …). The exact lists live in `UserRole::permissions()` in `src/auth/user.rs`. Owner has everything; Admin has everything except `ManageRoom`; Moderator has kick/mute/send/delete; Member has send and invite; Guest has send only. When we need to check an action, we call `UserRole::has_permission(permission)`. Room-level roles are stored in the room (e.g. `RoomManager`); the **User** struct also has an optional **global_role** for server-wide privileges—for example we set default `Member` for authenticated users when they connect.
 
-### Validation in authenticate_connection
+### Permissions We Gate On
 
-After decoding, the handler applies extra checks:
+The **Permission** enum covers: `ManageRoom`, `ManageRoles`, `KickUsers`, `BanUsers`, `MuteUsers`, `SendMessages`, `DeleteMessages`, `InviteUsers`, `CreateRooms`. Handlers (message handler, token management, room ops) resolve the user's role for the relevant room (or global) and call `has_permission` before doing the action. When someone sets a role (e.g. via `SetUserRole` with strings like `"owner"`, `"admin"`, `"moderator"`, `"member"`, `"guest"`), we parse that to `UserRole` and store it. So if you're adding a new action, make sure you gate it on the right permission and document which role has it.
 
-- Token length > 1000 → reject (“Token too long”).
-- Any control character in the token → reject (“Token contains invalid characters”).
-- Empty `sub` or `username` → reject (“Invalid token claims”).
-- `sub` length > 100 or `username` length > 50 → reject (“Token claims too long”).
+## Wrapping Up
 
-An **AuthTimer** enforces a minimum duration (e.g. 100 ms) before responding, to reduce timing side-channels. On failure, the client receives a generic “Authentication failed” message; no detailed error is exposed.
+- **JWT**: jsonwebtoken 10.3.0, TokenManager, optional revocation, claims validated and length-limited.
+- **Extraction**: Headers only; no URL.
+- **RBAC**: Five roles (Owner, Admin, Moderator, Member, Guest) with clear permissions; room-level and optional global role; checks before sensitive operations.
 
-## Role-Based Access Control (RBAC)
-
-Permissions are modeled as **roles** per room (and optionally a **global role** on the user). The server checks the user’s role before allowing actions such as sending messages, managing the room, or moderating users.
-
-### Available Roles
-
-Roles are defined in `auth::user::UserRole`:
-
-| Role        | Description                                  |
-|-------------|----------------------------------------------|
-| **Owner**   | Full control over the room and roles.        |
-| **Admin**   | Manage roles and moderate; no room ownership.|
-| **Moderator** | Kick, mute, send/delete messages.           |
-| **Member**  | Send messages and invite users.              |
-| **Guest**   | Send messages only.                          |
-
-### Permissions per Role
-
-Each role has a fixed set of **Permission** flags. The following lists are defined in `UserRole::permissions()` in `src/auth/user.rs`:
-
-- **Owner**: `ManageRoom`, `ManageRoles`, `KickUsers`, `BanUsers`, `MuteUsers`, `SendMessages`, `DeleteMessages`, `InviteUsers`, `CreateRooms`.
-- **Admin**: Same as Owner except **no** `ManageRoom` (cannot transfer/delete the room itself).
-- **Moderator**: `KickUsers`, `MuteUsers`, `SendMessages`, `DeleteMessages` (no role management, ban, or room creation).
-- **Member**: `SendMessages`, `InviteUsers`.
-- **Guest**: `SendMessages` only.
-
-Permission checks use `UserRole::has_permission(permission)`. Room-level roles are stored in the room (e.g. `RoomManager` / `user_roles`); the **User** struct also has an optional **global_role** used for server-wide privileges (e.g. default `Member` for authenticated users in `handlers::auth::authenticate_connection`).
-
-### Permission Enum
-
-`auth::user::Permission` defines the actions that can be gated by RBAC:
-
-- `ManageRoom` — Create, delete, configure rooms.
-- `ManageRoles` — Assign or remove roles.
-- `KickUsers` — Remove users from a room.
-- `BanUsers` — Ban users from a room.
-- `MuteUsers` — Mute users in a room.
-- `SendMessages` — Send messages to the room.
-- `DeleteMessages` — Delete any message.
-- `InviteUsers` — Invite users to the room.
-- `CreateRooms` — Create new rooms.
-
-Handlers (e.g. message handler, token management, room operations) resolve the user’s role for the relevant room (or global) and call `has_permission` before performing the action. Role assignment (e.g. `SetUserRole` with strings like `"owner"`, `"admin"`, `"moderator"`, `"member"`, `"guest"`) is parsed to `UserRole` and stored by the room or storage layer.
-
-## Summary
-
-- **JWT**: jsonwebtoken 10.3.0 with `aws_lc_rs`; TokenManager for encode/decode and optional revocation.
-- **Claims**: Standard fields including `sub`, `username`, `exp`, `iat`, `nbf`, `jti`; strict validation and length limits after decode.
-- **Extraction**: Headers only (Authorization Bearer, Sec-WebSocket-Protocol, X-Auth-Token); no URL.
-- **RBAC**: Five roles — Owner, Admin, Moderator, Member, Guest — with defined permissions; room-level and optional global role; checks performed before sensitive operations.
-
-These choices align with the 2026 audit’s recommendations for authentication, token handling, and role-based access control.
+If you're onboarding or contributing, start with "where does the token come from?" and "what role does this user have for this room?"—that'll get you most of the way.

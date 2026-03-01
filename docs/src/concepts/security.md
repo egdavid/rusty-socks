@@ -1,81 +1,58 @@
 # Security Model
 
-Rusty Socks v0.2.0 follows a **Security-First** approach aligned with the 2026 security audit. This document covers XSS/CSRF protections, Unicode validation, and connection-exhaustion protection.
+We take a **security-first** approach. This page explains how we think about it (and how the 2026 audit shaped our choices), then walks through XSS/CSRF, Unicode validation, and connection-exhaustion protection. If you're contributing or deploying, you'll want to understand these layers.
 
-## Security-First Approach (2026 Baseline)
+## How We Think About Security (2026 Baseline)
 
-The 2026 audit established a baseline for secure WebSocket servers: defense in depth, safe handling of user input, protection against cross-site and abuse vectors, and resource limits to prevent exhaustion. Rusty Socks v0.2.0 implements these principles as follows:
+The 2026 audit gave us a clear baseline: defense in depth, safe handling of user input, protection against cross-site and abuse, and hard limits so one bad actor can't exhaust resources. We've wired that into the design:
 
-- **No blocking in the request path** — avoids runtime stalls and improves resilience under load.
-- **Layered validation** — CSRF and origin checks before upgrade; IP rate limiting; then authentication and message/Unicode validation.
-- **Strict input validation** — Unicode security and XSS mitigations on all user-supplied content.
-- **Resource caps** — thread pool task limits, per-IP connection limits, and per-user message rate limits to prevent connection and memory exhaustion.
+- **No blocking in the request path** — keeps the runtime responsive and avoids a whole class of stalls under load.
+- **Layered validation** — we check CSRF and origin before we even upgrade; then IP rate limit; then auth and message/Unicode validation. So by the time we're doing real work, we've already said no to a lot of bad traffic.
+- **Strict input validation** — every user-supplied string goes through Unicode security and XSS mitigations. We'd rather reject weird input than risk it later.
+- **Resource caps** — thread pool, per-IP connections, and per-user message rate limits. Together they prevent connection and memory exhaustion.
 
-These improvements are cited as stemming from the 2026 audit baseline.
+You'll find it useful to keep "layers" in mind: we don't rely on one check; we stack them.
+
+<div class="callout security-alert">
+
+The layered approach (CSRF before upgrade, then rate limit, then auth and validation) was explicitly recommended in the 2026 audit to reduce attack surface before any application logic runs.
+
+</div>
 
 ## XSS and CSRF Protections
 
-### CSRF (Cross-Site Request Forgery)
+### CSRF: We Validate Before the Handshake
 
-WebSocket connections are validated for CSRF **before** the upgrade handshake. The `CSRFProtection` type (`security::csrf`) is used in a Warp filter that runs on every WebSocket request.
+We validate WebSocket connections for CSRF **before** the upgrade. So if the Origin (or Host, or something else) looks wrong, we never open the WebSocket. The `CSRFProtection` type lives in `security::csrf` and is used in a Warp filter that runs on every WebSocket request.
 
-**`validate_websocket_connection(&self, headers: &HeaderMap) -> CSRFValidationResult`** performs:
+`validate_websocket_connection` does the following: (1) **Origin** must match our allowed list (or localhost in dev when the list is empty); (2) **Host** is checked for suspicious values; (3) we look for headers that often indicate scripts/bots and mark the request **Suspicious** if we see them; (4) the **Upgrade** header must be present and equal to `websocket`. If any of that fails, we reject with a `CSRFRejection`. Configuration is via `RUSTY_SOCKS_ALLOWED_ORIGINS`, `development_mode`, and a dedicated `RUSTY_SOCKS_CSRF_SECRET`—we keep that separate from the JWT secret so a leak in one doesn't compromise the other.
 
-1. **Origin header** — Must match the configured allowed origins (or, in development mode with no list, allowed localhost origins). Requests with missing or disallowed `Origin` are rejected.
-2. **Host header** — Checked for suspicious values to mitigate Host header injection.
-3. **Automation headers** — Presence of headers that often indicate scripts/bots can result in `Suspicious`.
-4. **Upgrade header** — Must be present and equal to `websocket` (case-insensitive); otherwise `MissingHeaders` or `Suspicious`.
+### XSS: Encode and Sanitize Before Output
 
-Results are one of: `Valid`, `InvalidOrigin`, `InvalidToken`, `InvalidReferer`, `MissingHeaders`, `Suspicious`. The server applies `csrf_validation_filter` in the WebSocket route; any result other than `Valid` leads to rejection (e.g. `CSRFRejection`). Configuration uses `RUSTY_SOCKS_ALLOWED_ORIGINS`, `development_mode`, and a dedicated `RUSTY_SOCKS_CSRF_SECRET` (distinct from the JWT secret).
+The `security::xss` module is there so user content never gets interpreted as HTML or script. We have `encode_html`, `escape_javascript`, `sanitize_html`, `sanitize_url`, and helpers like `protect_user_content` / `sanitize_json_content`.
 
-### XSS (Cross-Site Scripting)
+<div class="callout developer-insight">
 
-The `security::xss` module provides output encoding and sanitization so user content cannot be interpreted as HTML or script:
+When adding a new code path that outputs user-supplied data, always run it through Unicode validation first, then through the appropriate XSS helper (`encode_html`, `sanitize_json_content`, etc.) before it hits the wire or storage. That way we avoid stored and reflected XSS.
 
-- **`encode_html`** — Encodes `&`, `<`, `>`, `"`, `'`, `/`, `` ` ``, `=` to HTML entities.
-- **`escape_javascript`** — Escapes backslash, quotes, newlines, and other characters for safe use in JS strings.
-- **`sanitize_html`** — Applies HTML encoding and replaces dangerous tokens (e.g. `script`, `javascript`, `onload`, `onclick`, `alert`, `eval`) with safe placeholders.
-- **`sanitize_url`** — Rejects dangerous schemes (`javascript:`, `data:`, `vbscript:`, `file:`, `ftp:`) and returns a safe encoded string or `None`.
-- **`protect_user_content`** / **`sanitize_json_content`** — Used to sanitize user-supplied strings and JSON before rendering or storage.
-
-Message content is validated for Unicode first (see below), then XSS protections are applied before broadcast or persistence, reducing the risk of stored or reflected XSS.
+</div>
 
 ## Unicode Validation
 
-User-supplied text (messages, room names) is validated with **`UnicodeSecurityValidator`** (`security::unicode_validation`) to block Unicode-based abuse and spoofing.
-
-### Error Types (`UnicodeSecurityError`)
-
-- **ControlCharacters** — Dangerous control characters (e.g. C0/C1, BiDi formatting).
-- **BidirectionalOverride** — Use of override isolates/embeds (e.g. RLO, LRO) that can hide or reorder text.
-- **HomographAttack** — Lookalike characters (e.g. Cyrillic/Greek lookalikes for Latin) used to deceive.
-- **MixedScriptAttack** — Mixed scripts in a single string in a way that is disallowed by config.
-- **InvalidUnicode** — Invalid or non-character code points.
-- **NormalizationAttack** / **NormalizationExpansion** — Abuse of normalization or excessive length after normalization.
-- **InvisibleCharacters** — Zero-width or other invisible characters.
-- **PrivateUseCharacters** — Characters from private use areas.
-
-Configuration is via **`UnicodeSecurityConfig`** (e.g. `max_normalized_length`, `allow_mixed_scripts`, `allow_bidirectional`, `allow_private_use`, `allowed_scripts`, `max_normalization_expansion`). The message handler and room-creation logic call the validator and reject invalid content with clear error codes (e.g. `INVALID_MESSAGE`, `INVALID_UNICODE`, `NORMALIZATION_ATTACK`).
+User text (messages, room names) goes through **UnicodeSecurityValidator** in `security::unicode_validation`. We block control characters, bidirectional overrides (that can hide or reorder text), homograph lookalikes, mixed scripts when we don't allow them, invalid or private-use characters, invisible/zero-width characters, and normalization abuse. The validator returns clear error types (`UnicodeSecurityError`) so the message handler can send back something like `INVALID_MESSAGE` or `NORMALIZATION_ATTACK` instead of a generic 500. You'll find the config in `UnicodeSecurityConfig` (max length, whether we allow mixed scripts, etc.). We use it in both message handling and room creation.
 
 ## Connection-Exhaustion Protection
 
-Multiple layers prevent a single client or a flood of connections from exhausting server resources.
+We don't want a single IP or a flood of connections to exhaust the server. So we cap things in three places.
 
-### Thread Pool Limits
+### Thread Pool
 
-The custom **ThreadPool** (`core::thread_pool`) enforces:
-
-- **Max queued tasks** — No more than `max_queued_tasks` (default 1000) concurrent tasks; additional submissions receive `None` from `execute()`.
-- **Task submission rate** — At most `(workers * 100).min(1000)` tasks per second; excess submissions are rejected.
-
-When the pool rejects a connection, the server does not upgrade the WebSocket and releases the IP slot (e.g. via `unregister_ip_connection`), so the connection count does not grow unbounded.
+The custom **ThreadPool** won't accept more than `max_queued_tasks` concurrent tasks, and it rate-limits how many tasks we accept per second. When the pool says no, we don't upgrade the WebSocket and we release the IP slot, so the total connection count doesn't grow unbounded.
 
 ### Per-IP Connection Limit
 
-**ConnectionLimiter** (`core::rate_limiter`) caps the number of simultaneous WebSocket connections per IP. Before each upgrade, the server calls `can_ip_connect(client_ip)` and then `register_ip_connection(client_ip)`. If either fails, the request is rejected with HTTP 429. The limit is configured by `max_connections_per_ip` (e.g. `RUSTY_SOCKS_MAX_CONNECTIONS_PER_IP`). An **IpConnectionGuard** in the WebSocket handler ensures the slot is released on disconnect (see [Rate Limiting](../guide/rate-limiting.md)).
+**ConnectionLimiter** (`core::rate_limiter`) caps how many WebSockets one IP can have open. Before each upgrade we call `can_ip_connect` and then `register_ip_connection`. If either fails, we return HTTP 429. The limit is configured by `max_connections_per_ip` (e.g. `RUSTY_SOCKS_MAX_CONN_PER_IP`). Releasing the slot when the client disconnects is handled by **IpConnectionGuard**—we have a whole section on that in the [Rate Limiting](../guide/rate-limiting.md) guide, including why the 2026 audit pushed us to do it with a guard.
 
 ### Per-User and Global Message Limits
 
-**MessageRateLimiter** (`core::rate_limiter`) limits how many messages each user can send per minute (sliding window) and enforces a global cap. It also bounds the number of tracked users (e.g. 10_000) to avoid unbounded memory use. When a user exceeds the limit, the server returns a rate-limit error (e.g. `RATE_LIMITED`) instead of processing the message.
-
-Together, thread pool limits, per-IP connection limits, and per-user message limits form the connection-exhaustion protection that the 2026 audit recommends for production WebSocket servers.
+**MessageRateLimiter** limits messages per user per minute (sliding window) and enforces a global cap. We also cap how many users we track (e.g. 10k) so memory doesn't blow up. When a user goes over the limit, we return a rate-limit error for that message instead of processing it. Together with the thread pool and per-IP limits, this is the connection-exhaustion story the 2026 audit asked for.
