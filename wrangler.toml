@@ -1,0 +1,17 @@
+name = "rustysocks-worker"
+# Entry is the JS bundle produced by worker-build (not the Rust source).
+# The [build] command runs first and creates build/index.js + build/index_bg.wasm.
+main = "build/index.js"
+compatibility_date = "2026-02-28"
+
+# Set ASYNQ_JWT_SECRET via: wrangler secret put ASYNQ_JWT_SECRET
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[durable_objects]
+bindings = [{name = "SOCKS_STATE", class_name = "RustySocksState"}]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RustySocksState"]

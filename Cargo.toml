@@ -9,34 +9,51 @@ repository = "https://github.com/egdavid/rusty-socks"
 readme = "README.md"
 license = "MIT"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 # SECURITY: Dependencies pinned to exact versions to prevent supply chain attacks
 # and ensure reproducible builds. Update regularly and audit security advisories.
+# Shared dependencies (used by both native binary and WASM worker).
 [dependencies]
-tokio = { version = "=1.45.1", features = ["full"] }
-warp = { version = "=0.3.7", features = ["tls"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.140"
 log = "=0.4.27"
-env_logger = "=0.10.2"
-uuid = { version = "=1.17.0", features = ["v4", "serde"] }
 chrono = { version = "=0.4.44", features = ["serde"] }
-futures-util = "=0.3.31"
-dotenvy = "=0.15.7"
-jsonwebtoken = { version = "=10.3.0", features = ["aws_lc_rs"] }
-argon2 = "=0.5.3"
-rand = "=0.8.5"
 base64 = "=0.22.1"
 async-trait = "=0.1.88"
-lru = "=0.16.3"
 url = "=2.5.4"
 sha2 = "=0.10.9"
+# Force newer time to address RUSTSEC-2026-0009 (transitive via x509-parser, jsonwebtoken)
+time = "=0.3.47"
+
+# Native-only (binary server): not used when building for wasm32-unknown-unknown
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uuid = { version = "=1.17.0", features = ["v4", "serde"] }
+jsonwebtoken = { version = "=10.3.0", features = ["aws_lc_rs"] }
+tokio = { version = "=1.45.1", features = ["full"] }
+warp = { version = "=0.3.7", features = ["tls"] }
+env_logger = "=0.10.2"
+futures-util = "=0.3.31"
+dotenvy = "=0.15.7"
+argon2 = "=0.5.3"
+rand = "=0.8.5"
+lru = "=0.16.3"
 tokio-rustls = "=0.24.1"
 rustls = "=0.21.12"
 rustls-pki-types = "=1.14.0"
 x509-parser = "=0.16.0"
 ring = "=0.17.12"
-# Force newer time to address RUSTSEC-2026-0009 (transitive via x509-parser, jsonwebtoken)
-time = "=0.3.47"
+
+# WASM-only (Cloudflare Worker): used when building for wasm32-unknown-unknown
+# jsonwebtoken with rust_crypto (pure Rust) for wasm32; aws_lc_rs does not compile for wasm32
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = "0.7"
+wasm-bindgen = "0.2"
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
+uuid = { version = "=1.17.0", features = ["v4", "serde", "js"] }
+jsonwebtoken = { version = "=10.3.0", features = ["rust_crypto"] }
 
 # SECURITY: Dev dependencies also pinned for reproducible test environments
 [dev-dependencies]
