@@ -22,7 +22,7 @@ log = "=0.4.27"
 chrono = { version = "=0.4.44", features = ["serde"] }
 base64 = "=0.22.1"
 async-trait = "=0.1.88"
-url = "=2.5.4"
+url = "=2.5.8"
 sha2 = "=0.10.9"
 # Force newer time to address RUSTSEC-2026-0009 (transitive via x509-parser, jsonwebtoken)
 time = "=0.3.47"
