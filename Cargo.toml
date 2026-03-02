@@ -57,7 +57,7 @@ jsonwebtoken = { version = "=10.3.0", features = ["rust_crypto"] }
 
 # SECURITY: Dev dependencies also pinned for reproducible test environments
 [dev-dependencies]
-reqwest = { version = "=0.11.27", features = ["json", "stream", "blocking"] }
+reqwest = { version = "=0.13.2", features = ["json", "stream", "blocking"] }
 tokio-tungstenite = "=0.21.0"
 futures-util = "=0.3.31"
 
