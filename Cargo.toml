@@ -31,7 +31,7 @@ time = "=0.3.47"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { version = "=1.17.0", features = ["v4", "serde"] }
 jsonwebtoken = { version = "=10.3.0", features = ["aws_lc_rs"] }
-tokio = { version = "=1.45.1", features = ["full"] }
+tokio = { version = "=1.50.0", features = ["full"] }
 warp = { version = "=0.3.7", features = ["tls"] }
 env_logger = "=0.10.2"
 futures-util = "=0.3.31"
