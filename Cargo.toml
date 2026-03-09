@@ -42,7 +42,7 @@ lru = "=0.16.3"
 tokio-rustls = "=0.24.1"
 rustls = "=0.21.12"
 rustls-pki-types = "=1.14.0"
-x509-parser = "=0.16.0"
+x509-parser = "=0.18.1"
 ring = "=0.17.12"
 
 # WASM-only (Cloudflare Worker): used when building for wasm32-unknown-unknown
